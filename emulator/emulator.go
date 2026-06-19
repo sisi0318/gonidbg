@@ -39,6 +39,10 @@ type Config struct {
 	// nil = dvm.AbstractJni{} (everything returns null/0). Implement dvm.Jni (or
 	// embed dvm.AbstractJni and override a few methods) to model the Java side.
 	JNI dvm.Jni
+	// DexPath optionally loads a classes.dex at boot so FindClass/GetMethodID/
+	// GetFieldID resolve against real class/method/field metadata (signatures,
+	// superclasses) instead of being synthesized. Metadata only — no bytecode.
+	DexPath string
 	// ProcessName is the emulated process name reported via /proc/self/* etc.
 	ProcessName string
 	// Pid reported to the guest (getpid/gettid/...). 0 = a default.
@@ -99,6 +103,7 @@ type Emulator struct {
 	natives     map[string]uint64      // "class.name+sig" -> registered native fn ptr
 	methods     map[dvm.Ref]*methodRef // jmethodID -> (class, method)
 	arrayPins   map[uint64]dvm.Ref     // GetByteArrayElements ptr -> array ref (copy-back)
+	pendingExc  bool                   // a pending JNI exception (Throw/ThrowNew)
 
 	hostByName map[string]hostFn // libc funcs we implement in Go (override bionic)
 	hostImpl   map[uint64]hostFn // svc addr -> host impl
@@ -117,6 +122,10 @@ func (e *Emulator) MainModule() *Module { return e.main }
 
 // VM returns the fake Dalvik VM (class registry + handle table).
 func (e *Emulator) VM() *dvm.VM { return e.vm }
+
+// LoadDex parses a classes.dex and registers its classes/methods/fields into the
+// VM (metadata only — no bytecode execution). Returns the class count.
+func (e *Emulator) LoadDex(path string) (int, error) { return e.vm.LoadDexFile(path) }
 
 // GuestExited reports whether the guest called exit/exit_group and its code.
 func (e *Emulator) GuestExited() (bool, int) { return e.kctx.Exited, e.kctx.ExitCode }
@@ -166,6 +175,15 @@ func New(cfg Config) (*Emulator, error) {
 		e.vm.SetJni(cfg.JNI)
 	} else {
 		e.vm.SetJni(dvm.AbstractJni{})
+	}
+	if cfg.DexPath != "" {
+		nc, derr := e.vm.LoadDexFile(cfg.DexPath)
+		if derr != nil {
+			return nil, fmt.Errorf("load dex: %w", derr)
+		}
+		if cfg.Verbose {
+			fmt.Printf("[dex] %s -> %d classes\n", cfg.DexPath, nc)
+		}
 	}
 	registerHostFns(e) // libc functions we implement in Go (need no libc init)
 	e.kctx = &kernel.Context{B: be, Mem: e.mem, VFS: e.fs, Pid: pid, Verbose: cfg.Verbose}
@@ -346,13 +364,22 @@ func (e *Emulator) JavaVM() uint64 {
 	return e.javaVM
 }
 
+// JNIEnv returns the guest JNIEnv* (a pointer to the function table), building
+// the JNI tables on first use. Pass it to native functions that take a JNIEnv*.
+func (e *Emulator) JNIEnv() uint64 {
+	if e.jniEnv == 0 {
+		e.SetupJNI()
+	}
+	return e.jniEnv
+}
+
 // Sym returns a resolved global symbol address.
 func (e *Emulator) Sym(name string) (uint64, bool) { a, ok := e.syms[name]; return a, ok }
 
 // onInterrupt handles SVC: a stub call (unresolved import) or a real syscall.
 func (e *Emulator) onInterrupt(b emu.Backend, intno uint32) {
 	pc, _ := b.RegRead(emu.RegPC)
-	svc := pc - 4 // unicorn advances PC past the svc
+	svc := pc - 4            // unicorn advances PC past the svc
 	if svc == e.getEnvStub { // JavaVM->GetEnv(vm, void** env, version)
 		envpp, _ := b.RegRead(emu.RegX1)
 		_ = putU64(b, envpp, e.jniEnv)

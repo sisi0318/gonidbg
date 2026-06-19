@@ -25,55 +25,56 @@ const BrkBase = 0x30000000
 // AArch64 syscall numbers (asm-generic unistd). Only the ones unidbg's handler
 // implements / that bionic is likely to invoke on the call path are listed.
 const (
-	SYS_getcwd          = 17
-	SYS_mkdirat         = 34
-	SYS_ioctl           = 29
-	SYS_faccessat       = 48
-	SYS_openat          = 56
-	SYS_close           = 57
-	SYS_pipe2           = 59
-	SYS_getdents64      = 61
-	SYS_lseek           = 62
-	SYS_read            = 63
-	SYS_write           = 64
-	SYS_writev          = 66
-	SYS_pread64         = 67
-	SYS_ppoll           = 73
-	SYS_readlinkat      = 78
-	SYS_newfstatat      = 79
-	SYS_fstat           = 80
-	SYS_exit            = 93
-	SYS_exit_group      = 94
-	SYS_set_tid_address = 96
-	SYS_futex           = 98
-	SYS_set_robust_list = 99
-	SYS_nanosleep       = 101
-	SYS_clock_gettime   = 113
-	SYS_gettimeofday    = 169
-	SYS_sched_yield     = 124
-	SYS_kill            = 129
-	SYS_rt_sigaction    = 134
-	SYS_rt_sigprocmask  = 135
-	SYS_rt_sigtimedwait = 137
-	SYS_tgkill          = 131
-	SYS_uname           = 160
-	SYS_getpid          = 172
-	SYS_getppid         = 173
-	SYS_getuid          = 174
-	SYS_geteuid         = 175
-	SYS_gettid          = 178
-	SYS_sysinfo         = 179
-	SYS_brk             = 214
-	SYS_munmap          = 215
-	SYS_mremap          = 216
-	SYS_clone           = 220
-	SYS_mmap            = 222
-	SYS_mprotect        = 226
-	SYS_madvise         = 233
-	SYS_prctl           = 167
-	SYS_prlimit64       = 261
-	SYS_getrandom       = 278
-	SYS_statx           = 291
+	SYS_getcwd            = 17
+	SYS_mkdirat           = 34
+	SYS_ioctl             = 29
+	SYS_faccessat         = 48
+	SYS_openat            = 56
+	SYS_close             = 57
+	SYS_pipe2             = 59
+	SYS_getdents64        = 61
+	SYS_lseek             = 62
+	SYS_read              = 63
+	SYS_write             = 64
+	SYS_writev            = 66
+	SYS_pread64           = 67
+	SYS_ppoll             = 73
+	SYS_readlinkat        = 78
+	SYS_newfstatat        = 79
+	SYS_fstat             = 80
+	SYS_exit              = 93
+	SYS_exit_group        = 94
+	SYS_set_tid_address   = 96
+	SYS_futex             = 98
+	SYS_set_robust_list   = 99
+	SYS_nanosleep         = 101
+	SYS_clock_gettime     = 113
+	SYS_gettimeofday      = 169
+	SYS_sched_yield       = 124
+	SYS_sched_getaffinity = 123
+	SYS_kill              = 129
+	SYS_rt_sigaction      = 134
+	SYS_rt_sigprocmask    = 135
+	SYS_rt_sigtimedwait   = 137
+	SYS_tgkill            = 131
+	SYS_uname             = 160
+	SYS_getpid            = 172
+	SYS_getppid           = 173
+	SYS_getuid            = 174
+	SYS_geteuid           = 175
+	SYS_gettid            = 178
+	SYS_sysinfo           = 179
+	SYS_brk               = 214
+	SYS_munmap            = 215
+	SYS_mremap            = 216
+	SYS_clone             = 220
+	SYS_mmap              = 222
+	SYS_mprotect          = 226
+	SYS_madvise           = 233
+	SYS_prctl             = 167
+	SYS_prlimit64         = 261
+	SYS_getrandom         = 278
+	SYS_statx             = 291
 	// sockets (bionic on android routes these as real syscalls)
 	SYS_socket  = 198
 	SYS_connect = 203
@@ -85,6 +86,8 @@ const (
 	EPERM  = 1
 	EBADF  = 9
 	ENOENT = 2
+	EINVAL = 22
+	ERANGE = 34
 )
 
 // Context is the state a syscall handler operates on.
@@ -128,18 +131,18 @@ type Handler func(c *Context, args [6]uint64) int64
 // a logged ENOSYS, which is how you discover the next syscall to implement when
 // bringing a new .so up.
 var table = map[uint64]Handler{
-	SYS_getpid:        func(c *Context, _ [6]uint64) int64 { return int64(c.Pid) },
-	SYS_getppid:       func(c *Context, _ [6]uint64) int64 { return 1 },
-	SYS_gettid:        func(c *Context, _ [6]uint64) int64 { return int64(c.Pid) },
-	SYS_getuid:        func(c *Context, _ [6]uint64) int64 { return 10000 },
-	SYS_geteuid:       func(c *Context, _ [6]uint64) int64 { return 10000 },
-	SYS_sched_yield:   func(c *Context, _ [6]uint64) int64 { return 0 },
+	SYS_getpid:          func(c *Context, _ [6]uint64) int64 { return int64(c.Pid) },
+	SYS_getppid:         func(c *Context, _ [6]uint64) int64 { return 1 },
+	SYS_gettid:          func(c *Context, _ [6]uint64) int64 { return int64(c.Pid) },
+	SYS_getuid:          func(c *Context, _ [6]uint64) int64 { return 10000 },
+	SYS_geteuid:         func(c *Context, _ [6]uint64) int64 { return 10000 },
+	SYS_sched_yield:     func(c *Context, _ [6]uint64) int64 { return 0 },
 	SYS_set_tid_address: func(c *Context, _ [6]uint64) int64 { return int64(c.Pid) },
 	SYS_set_robust_list: func(c *Context, _ [6]uint64) int64 { return 0 },
-	SYS_rt_sigaction:  func(c *Context, _ [6]uint64) int64 { return 0 },
-	SYS_rt_sigprocmask: func(c *Context, _ [6]uint64) int64 { return 0 },
-	SYS_prctl:         func(c *Context, _ [6]uint64) int64 { return 0 },
-	SYS_madvise:       func(c *Context, _ [6]uint64) int64 { return 0 },
+	SYS_rt_sigaction:    func(c *Context, _ [6]uint64) int64 { return 0 },
+	SYS_rt_sigprocmask:  func(c *Context, _ [6]uint64) int64 { return 0 },
+	SYS_prctl:           func(c *Context, _ [6]uint64) int64 { return 0 },
+	SYS_madvise:         func(c *Context, _ [6]uint64) int64 { return 0 },
 
 	SYS_mmap:     sysMmap,
 	SYS_munmap:   sysMunmap,
@@ -148,31 +151,30 @@ var table = map[uint64]Handler{
 	SYS_exit:       sysExit,
 	SYS_exit_group: sysExit,
 
-	// The remaining ones below need full implementations (memory + vfs + clock).
-	// They are intentionally left as TODO stubs so an un-implemented call is
-	// loud rather than silently wrong.
-	SYS_brk:           sysBrk,
-	SYS_openat:        sysOpenat,
-	SYS_close:         sysClose,
-	SYS_read:          sysRead,
-	SYS_write:         sysWrite,
-	SYS_writev:        sysWritev,
-	SYS_readlinkat:    todo("readlinkat"),
-	SYS_newfstatat:    sysNewfstatat,
-	SYS_fstat:         sysFstat,
-	SYS_faccessat:     sysFaccessat,
-	SYS_mkdirat:       sysMkdirat,
-	SYS_lseek:         sysLseek,
-	SYS_getdents64:    todo("getdents64"),
-	SYS_clock_gettime: sysClockGettime,
-	SYS_gettimeofday:  sysGettimeofday,
-	SYS_uname:         todo("uname"),
-	SYS_sysinfo:       todo("sysinfo"),
-	SYS_getrandom:     sysGetrandom,
-	SYS_prlimit64:     todo("prlimit64"),
-	SYS_futex:         sysFutex,
-	SYS_ioctl:         todo("ioctl"),
-	SYS_statx:         todo("statx"),
+	SYS_brk:               sysBrk,
+	SYS_openat:            sysOpenat,
+	SYS_close:             sysClose,
+	SYS_read:              sysRead,
+	SYS_write:             sysWrite,
+	SYS_writev:            sysWritev,
+	SYS_readlinkat:        sysReadlinkat,
+	SYS_newfstatat:        sysNewfstatat,
+	SYS_fstat:             sysFstat,
+	SYS_faccessat:         sysFaccessat,
+	SYS_mkdirat:           sysMkdirat,
+	SYS_lseek:             sysLseek,
+	SYS_getcwd:            sysGetcwd,
+	SYS_getdents64:        sysGetdents64,
+	SYS_clock_gettime:     sysClockGettime,
+	SYS_gettimeofday:      sysGettimeofday,
+	SYS_uname:             sysUname,
+	SYS_sysinfo:           sysSysinfo,
+	SYS_getrandom:         sysGetrandom,
+	SYS_prlimit64:         sysPrlimit64,
+	SYS_futex:             sysFutex,
+	SYS_ioctl:             sysIoctl,
+	SYS_statx:             sysStatx,
+	SYS_sched_getaffinity: sysSchedGetaffinity,
 }
 
 // Names is the reverse map for tracing.
@@ -192,6 +194,7 @@ var Names = map[uint64]string{
 	SYS_prlimit64: "prlimit64", SYS_getrandom: "getrandom", SYS_statx: "statx",
 	SYS_socket: "socket", SYS_connect: "connect", SYS_rt_sigaction: "rt_sigaction",
 	SYS_rt_sigprocmask: "rt_sigprocmask", SYS_sched_yield: "sched_yield",
+	SYS_sched_getaffinity: "sched_getaffinity",
 }
 
 // Dispatch reads the syscall number + args from the backend, runs the handler,
@@ -584,3 +587,147 @@ func todo(name string) Handler {
 }
 
 func pageUp(x uint64) uint64 { return (x + 0xfff) &^ 0xfff }
+
+// sysUname fills `struct utsname` (6 × 65-byte NUL-padded fields) with Android-ish
+// values so libc's uname()-based checks succeed.
+func sysUname(c *Context, a [6]uint64) int64 {
+	var buf [6 * 65]byte
+	set := func(i int, s string) { copy(buf[i*65:i*65+64], s) }
+	set(0, "Linux")
+	set(1, "localhost")
+	set(2, "4.14.117-gonidbg")
+	set(3, "#1 SMP PREEMPT")
+	set(4, "aarch64")
+	set(5, "localdomain")
+	c.B.MemWrite(a[0], buf[:])
+	return 0
+}
+
+// sysSysinfo fills a plausible `struct sysinfo` (LP64 layout) — enough RAM/uptime
+// for libc heuristics; not real host stats.
+func sysSysinfo(c *Context, a [6]uint64) int64 {
+	var st [128]byte
+	put := func(off int, v uint64) { binary.LittleEndian.PutUint64(st[off:], v) }
+	put(0, 1000)                               // uptime (s)
+	put(32, 4*1024*1024*1024)                  // totalram
+	put(40, 2*1024*1024*1024)                  // freeram
+	binary.LittleEndian.PutUint16(st[80:], 64) // procs
+	binary.LittleEndian.PutUint32(st[104:], 1) // mem_unit (bytes)
+	c.B.MemWrite(a[0], st[:])
+	return 0
+}
+
+// sysReadlinkat resolves the handful of /proc symlinks libc reads at startup.
+func sysReadlinkat(c *Context, a [6]uint64) int64 {
+	path := c.readCStr(a[1])
+	var target string
+	switch path {
+	case "/proc/self/exe":
+		target = "/system/bin/app_process64"
+	case "/proc/self/cwd":
+		target = "/"
+	default:
+		if c.Verbose {
+			fmt.Printf("[readlinkat] %q -> ENOENT\n", path)
+		}
+		return -ENOENT
+	}
+	n := uint64(len(target))
+	if n > a[3] {
+		n = a[3]
+	}
+	c.B.MemWrite(a[2], []byte(target)[:n])
+	return int64(n)
+}
+
+// sysGetdents64 reports an empty directory (end-of-stream). A real enumeration
+// of the VFS could go here; empty is correct and safe for callers that iterate.
+func sysGetdents64(c *Context, a [6]uint64) int64 { return 0 }
+
+// sysGetcwd writes the current working directory (root) including the NUL.
+func sysGetcwd(c *Context, a [6]uint64) int64 {
+	cwd := []byte("/\x00")
+	if uint64(len(cwd)) > a[1] {
+		return -ERANGE
+	}
+	c.B.MemWrite(a[0], cwd)
+	return int64(len(cwd))
+}
+
+// sysPrlimit64 returns sensible RLIMITs (stack 8 MiB, files 1024, else infinity).
+func sysPrlimit64(c *Context, a [6]uint64) int64 {
+	if old := a[3]; old != 0 {
+		cur, max := ^uint64(0), ^uint64(0) // RLIM_INFINITY
+		switch a[1] {
+		case 3: // RLIMIT_STACK
+			cur, max = 8*1024*1024, 8*1024*1024
+		case 7: // RLIMIT_NOFILE
+			cur, max = 1024, 4096
+		}
+		var b [16]byte
+		binary.LittleEndian.PutUint64(b[0:], cur)
+		binary.LittleEndian.PutUint64(b[8:], max)
+		c.B.MemWrite(old, b[:])
+	}
+	return 0
+}
+
+// sysIoctl is a permissive no-op (success); the sign path issues no meaningful
+// ioctls. Logged under -v so a load-bearing one is noticeable.
+func sysIoctl(c *Context, a [6]uint64) int64 {
+	if c.Verbose {
+		fmt.Printf("[ioctl] fd=%d req=0x%x -> 0\n", a[0], a[1])
+	}
+	return 0
+}
+
+// sysSchedGetaffinity reports up to 8 online CPUs and returns the mask byte count.
+func sysSchedGetaffinity(c *Context, a [6]uint64) int64 {
+	n := a[1] // cpusetsize
+	if n == 0 {
+		return -EINVAL
+	}
+	if n > 8 {
+		n = 8
+	}
+	mask := make([]byte, n)
+	mask[0] = 0xFF // CPUs 0..7 online
+	c.B.MemWrite(a[2], mask)
+	return int64(n)
+}
+
+// sysStatx fills a minimal `struct statx` (like newfstatat, statx ABI).
+func sysStatx(c *Context, a [6]uint64) int64 {
+	path := c.readCStr(a[1])
+	var size int64 = -1
+	isDir := c.dirs[path]
+	switch {
+	case isDir:
+		size = 4096
+	default:
+		if data, err := c.VFS.Read(path); err == nil {
+			size = int64(len(data))
+		} else if w, ok := c.wstore()[path]; ok {
+			size = int64(len(w))
+		}
+	}
+	if size < 0 {
+		if c.Verbose {
+			fmt.Printf("[statx] %q -> ENOENT\n", path)
+		}
+		return -ENOENT
+	}
+	var st [256]byte
+	mode := uint16(0x81a4) // S_IFREG|0644
+	if isDir {
+		mode = 0x41ed // S_IFDIR|0755
+	}
+	binary.LittleEndian.PutUint32(st[0:], 0x7ff)                   // stx_mask (basic)
+	binary.LittleEndian.PutUint32(st[4:], 0x1000)                  // stx_blksize
+	binary.LittleEndian.PutUint32(st[16:], 1)                      // stx_nlink
+	binary.LittleEndian.PutUint16(st[28:], mode)                   // stx_mode
+	binary.LittleEndian.PutUint64(st[40:], uint64(size))           // stx_size
+	binary.LittleEndian.PutUint64(st[48:], uint64((size+511)/512)) // stx_blocks
+	c.B.MemWrite(a[4], st[:])
+	return 0
+}

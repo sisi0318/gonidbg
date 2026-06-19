@@ -72,7 +72,7 @@ func NewVM() *VM {
 	return &VM{
 		classes: map[string]*Class{},
 		objs:    map[Ref]*Object{},
-		nextRef: 0x100,    // start handles away from 0/low ints
+		nextRef: 0x100, // start handles away from 0/low ints
 		nextID:  0x7000_0001,
 	}
 }
@@ -138,6 +138,58 @@ func (c *Class) MethodID(vm *VM, name, sig string, static bool) *Method {
 	m := &Method{ID: id, Name: name, Sig: sig, Static: static}
 	c.methods[key] = m
 	return m
+}
+
+// FieldID interns a field by name + type descriptor (e.g. "Ljava/lang/String;").
+func (c *Class) FieldID(vm *VM, name, sig string, static bool) *Field {
+	key := name + ":" + sig
+	if f, ok := c.fields[key]; ok {
+		return f
+	}
+	vm.mu.Lock()
+	id := vm.nextID
+	vm.nextID++
+	vm.mu.Unlock()
+	f := &Field{ID: id, Name: name, Sig: sig, Static: static}
+	c.fields[key] = f
+	return f
+}
+
+// Methods returns the class's registered methods (e.g. after LoadDex).
+func (c *Class) Methods() []*Method {
+	out := make([]*Method, 0, len(c.methods))
+	for _, m := range c.methods {
+		out = append(out, m)
+	}
+	return out
+}
+
+// Fields returns the class's registered fields.
+func (c *Class) Fields() []*Field {
+	out := make([]*Field, 0, len(c.fields))
+	for _, f := range c.fields {
+		out = append(out, f)
+	}
+	return out
+}
+
+// LookupClass returns an already-registered class (without creating one).
+func (vm *VM) LookupClass(name string) (*Class, bool) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	c, ok := vm.classes[name]
+	return c, ok
+}
+
+// Classes returns every registered class (e.g. all classes loaded from a DEX).
+func (vm *VM) Classes() []*Class {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	out := make([]*Class, 0, len(vm.classes))
+	for _, c := range vm.classes {
+		out = append(out, c)
+	}
+	return out
 }
 
 func (c *Class) String() string { return c.Name }

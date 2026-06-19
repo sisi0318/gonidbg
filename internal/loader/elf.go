@@ -41,19 +41,19 @@ type Sym struct {
 
 // Image is the parsed, ready-to-map representation of one .so.
 type Image struct {
-	Path      string
-	Machine   elf.Machine
-	Segments  []Segment
-	Relocs    []Reloc
-	Syms      []Sym // indexed identically to ELF .dynsym
-	Imports   []string
-	Exports   map[string]uint64 // name -> image-relative addr
-	InitArray     []uint64 // RAW .init_array contents (often all 0 on AArch64 — RELA addends hold the real pointers; read post-relocation from memory instead)
-	InitArrayAddr uint64   // image-relative vaddr of .init_array
-	InitArrayLen  int      // number of entries
-	Init          uint64   // DT_INIT (0 if none)
-	Needed    []string
-	LoadSpan  uint64 // total virtual span to reserve
+	Path          string
+	Machine       elf.Machine
+	Segments      []Segment
+	Relocs        []Reloc
+	Syms          []Sym // indexed identically to ELF .dynsym
+	Imports       []string
+	Exports       map[string]uint64 // name -> image-relative addr
+	InitArray     []uint64          // RAW .init_array contents (often all 0 on AArch64 — RELA addends hold the real pointers; read post-relocation from memory instead)
+	InitArrayAddr uint64            // image-relative vaddr of .init_array
+	InitArrayLen  int               // number of entries
+	Init          uint64            // DT_INIT (0 if none)
+	Needed        []string
+	LoadSpan      uint64 // total virtual span to reserve
 }
 
 // Parse reads the ELF and builds the Image. base is not applied here; all

@@ -36,7 +36,9 @@ unidbg is the de-facto tool for emulating Android native libraries, but it runs 
 - Linux/AArch64 syscall subset (mmap/mprotect/openat/read/write/clock_gettime/getrandom/futex/…), served against a small virtual filesystem (`/system/lib64`, `/proc/self/*`, properties, tzdata).
 - JNI/JavaVM: a guest `JNIEnv`/`JavaVM` whose calls trap back to a Go handler you implement (`FindClass`, `GetMethodID`, `Call*Method*`, `RegisterNatives`, strings, byte arrays, …).
 - Call native functions by symbol or by module offset, pass up to 8 integer args, and read the return value.
-- Replace a native function with a Go callback (unidbg-style hook), with automatic code-cache invalidation.
+- Replace a native function with a Go callback (`Replace`, entry hook), or **inline hook** (`HookAddr`, per-instruction, Unicorn) to rewrite registers / redirect PC; both invalidate the code cache automatically.
+- **Console debugger**: breakpoints / single-step / registers / memory (Unicorn; I/O is injectable for scripting).
+- Load **real class/method/field metadata from a classes.dex** (`Config.DexPath` / `LoadDex`): FindClass/GetMethodID/GetFieldID resolve against true signatures and superclasses (metadata only, no bytecode).
 - Memory helpers: alloc, read/write bytes, C-strings, and LE integers.
 - Per-instruction trace (Unicorn).
 - Selectable engine: build with `-tags unicorn`, `-tags dynarmic`, or both, and choose at runtime with `-engine` / `$GONIDBG_ENGINE`.
@@ -169,16 +171,15 @@ gonidbg/
 
 ## Compared to unidbg
 
-Implemented: AArch64 ELF load and dynamic linking, real bionic reuse, selectable Unicorn/dynarmic backend, Linux syscall subset, JNI/JavaVM with a Go handler, call by symbol or offset, function `Replace` (Go hook), memory helpers, and instruction trace.
+Implemented: AArch64 ELF load and dynamic linking, real bionic reuse, selectable Unicorn/dynarmic backend, a Linux syscall subset (including uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity), JNI/JavaVM with a Go handler (strings, byte and object arrays, exceptions, more Call variants), call by symbol or offset, function `Replace` plus inline hooks (`HookAddr`), a console debugger (breakpoints/step/registers/memory), loading real class/method/field metadata from a classes.dex, memory helpers, and instruction trace.
 
 Not yet (roadmap, and PRs are welcome):
 
 - ARM32; only AArch64 for now.
-- The full JNI surface. A usable subset of `JNINativeInterface` is implemented, not all ~232 slots.
-- The full syscall table. There are a few dozen, not unidbg's complete set.
-- An APK/DEX-backed VM. gonidbg's `dvm` is synthetic: you model the Java side in Go, and it does not parse classes out of an APK.
-- Mid-function or inline hooks (only function-entry `Replace`), an interactive console debugger, signals, and real threads (`pthread_create` is a no-op).
-- iOS / Mach-O.
+- JNI and syscalls are still subsets: they cover common usage, not all ~232 JNI slots or the full syscall table.
+- DEX is metadata-only. It parses classes/methods/fields (signatures, superclasses) so FindClass/GetMethodID/GetFieldID resolve, but it does not execute DEX bytecode (no JVM); model Java-side behavior with a `dvm.Jni` handler.
+- Inline hooks and the console debugger require the Unicorn engine (dynarmic is a block JIT with no per-instruction hook).
+- Real threads (`pthread_create` is a no-op), signals, and iOS / Mach-O.
 
 ## Building from source / engines
 

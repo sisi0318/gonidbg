@@ -3,12 +3,23 @@ package emulator
 import (
 	"encoding/binary"
 	"fmt"
+	"unicode/utf16"
 
 	"github.com/sisi0318/gonidbg/dvm"
 	"github.com/sisi0318/gonidbg/internal/emu"
 )
 
 func le64(b []byte) uint64 { return binary.LittleEndian.Uint64(b) }
+
+// utf16le encodes s as little-endian UTF-16 (no terminator) for JNI jchar* APIs.
+func utf16le(s string) []byte {
+	u := utf16.Encode([]rune(s))
+	out := make([]byte, len(u)*2)
+	for i, c := range u {
+		binary.LittleEndian.PutUint16(out[i*2:], c)
+	}
+	return out
+}
 
 type methodRef struct {
 	cls *dvm.Class
@@ -51,50 +62,61 @@ func (e *Emulator) decodeVaList(vaPtr uint64, n int) []uint64 {
 
 // JNINativeInterface slot indices (0-based within the struct; first 4 reserved).
 const (
-	jniGetVersion           = 4
-	jniFindClass            = 6
-	jniExceptionOccurred    = 15
-	jniExceptionDescribe    = 16
-	jniExceptionClear       = 17
-	jniNewGlobalRef         = 21
-	jniDeleteGlobalRef      = 22
-	jniDeleteLocalRef       = 23
-	jniIsSameObject         = 24
-	jniNewLocalRef          = 25
-	jniGetObjectClass       = 31
-	jniGetMethodID          = 33
-	jniGetFieldID           = 94
-	jniGetStaticMethodID    = 113
-	jniGetStaticFieldID     = 144
-	jniNewStringUTF         = 167
-	jniGetStringUTFLength   = 168
-	jniGetStringUTFChars    = 169
-	jniReleaseStringUTFChrs = 170
-	jniGetArrayLength       = 171
-	jniNewByteArray         = 176
-	jniGetByteArrayElements = 184
-	jniRelByteArrayElements = 192
-	jniGetByteArrayRegion   = 200
-	jniSetByteArrayRegion   = 208
-	jniRegisterNatives      = 215
-	jniGetJavaVM            = 219
-	jniExceptionCheck       = 228
+	jniGetVersion            = 4
+	jniFindClass             = 6
+	jniExceptionOccurred     = 15
+	jniExceptionDescribe     = 16
+	jniExceptionClear        = 17
+	jniNewGlobalRef          = 21
+	jniDeleteGlobalRef       = 22
+	jniDeleteLocalRef        = 23
+	jniIsSameObject          = 24
+	jniNewLocalRef           = 25
+	jniGetObjectClass        = 31
+	jniGetMethodID           = 33
+	jniGetFieldID            = 94
+	jniGetStaticMethodID     = 113
+	jniGetStaticFieldID      = 144
+	jniNewStringUTF          = 167
+	jniGetStringUTFLength    = 168
+	jniGetStringUTFChars     = 169
+	jniReleaseStringUTFChrs  = 170
+	jniGetArrayLength        = 171
+	jniNewObjectArray        = 172
+	jniGetObjectArrayElement = 173
+	jniSetObjectArrayElement = 174
+	jniNewByteArray          = 176
+	jniGetByteArrayElements  = 184
+	jniRelByteArrayElements  = 192
+	jniGetByteArrayRegion    = 200
+	jniSetByteArrayRegion    = 208
+	jniRegisterNatives       = 215
+	jniGetJavaVM             = 219
+	jniExceptionCheck        = 228
 )
 
 var jniNames = map[int]string{
 	4: "GetVersion", 6: "FindClass", 10: "GetSuperclass", 11: "IsAssignableFrom",
+	13: "Throw", 14: "ThrowNew",
 	15: "ExceptionOccurred", 16: "ExceptionDescribe", 17: "ExceptionClear",
 	19: "PushLocalFrame", 20: "PopLocalFrame", 21: "NewGlobalRef", 22: "DeleteGlobalRef",
 	23: "DeleteLocalRef", 24: "IsSameObject", 25: "NewLocalRef", 26: "EnsureLocalCapacity",
-	27: "AllocObject", 31: "GetObjectClass", 32: "IsInstanceOf", 33: "GetMethodID",
-	34: "CallObjectMethod", 35: "CallObjectMethodV", 52: "CallLongMethod", 53: "CallLongMethodV",
+	27: "AllocObject", 28: "NewObject", 29: "NewObjectV", 30: "NewObjectA",
+	31: "GetObjectClass", 32: "IsInstanceOf", 33: "GetMethodID",
+	34: "CallObjectMethod", 35: "CallObjectMethodV", 37: "CallBooleanMethod", 38: "CallBooleanMethodV",
+	49: "CallIntMethod", 50: "CallIntMethodV", 52: "CallLongMethod", 53: "CallLongMethodV",
+	61: "CallVoidMethod", 62: "CallVoidMethodV",
 	94: "GetFieldID", 113: "GetStaticMethodID", 114: "CallStaticObjectMethod",
 	115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 164: "GetStringLength",
+	165: "GetStringChars", 166: "ReleaseStringChars",
 	167: "NewStringUTF", 168: "GetStringUTFLength", 169: "GetStringUTFChars",
-	170: "ReleaseStringUTFChars", 171: "GetArrayLength", 176: "NewByteArray",
+	170: "ReleaseStringUTFChars", 171: "GetArrayLength",
+	172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement",
+	176: "NewByteArray",
 	184: "GetByteArrayElements", 192: "ReleaseByteArrayElements", 200: "GetByteArrayRegion",
-	208: "SetByteArrayRegion", 215: "RegisterNatives", 219: "GetJavaVM", 228: "ExceptionCheck",
-	232: "GetObjectRefType",
+	208: "SetByteArrayRegion", 215: "RegisterNatives", 217: "MonitorEnter", 218: "MonitorExit",
+	219: "GetJavaVM", 220: "GetStringRegion", 221: "GetStringUTFRegion",
+	228: "ExceptionCheck", 232: "GetObjectRefType",
 }
 
 func jniLabel(idx int) string {
@@ -161,9 +183,14 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 			detail = sig
 		}
 
-	case 52, 53: // CallLongMethod[V] (instance) -> the Jni handler.CallLongMethodV
-		if obj, sig, va := e.callInstanceInfo(b, idx == 53); obj != nil {
+	case 37, 38, 49, 50, 52, 53: // CallBoolean/Int/Long Method[V] (instance) -> CallLongMethodV
+		if obj, sig, va := e.callInstanceInfo(b, idx == 38 || idx == 50 || idx == 53); obj != nil {
 			ret = uint64(e.vm.Jni().CallLongMethodV(e.vm, obj, sig, va))
+			detail = sig
+		}
+	case 61, 62: // CallVoidMethod[V] (instance) -> CallObjectMethodV, result ignored
+		if obj, sig, va := e.callInstanceInfo(b, idx == 62); obj != nil {
+			e.vm.Jni().CallObjectMethodV(e.vm, obj, sig, va)
 			detail = sig
 		}
 
@@ -227,6 +254,36 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 				ret = uint64(len(v))
 			case []*dvm.Object:
 				ret = uint64(len(v))
+			case []dvm.Ref:
+				ret = uint64(len(v))
+			}
+		}
+
+	case jniNewObjectArray: // (jsize len, jclass elem, jobject init) -> jobjectArray
+		n := int(int32(e.jarg(b, 1)))
+		initRef := dvm.Ref(int32(e.jarg(b, 3)))
+		if n < 0 {
+			n = 0
+		}
+		arr := make([]dvm.Ref, n)
+		for i := range arr {
+			arr[i] = initRef
+		}
+		ret = uint64(e.vm.NewObject(e.vm.ResolveClass("[Ljava/lang/Object;"), arr))
+	case jniGetObjectArrayElement: // (jobjectArray, jsize idx) -> jobject
+		if o := e.vm.Deref(dvm.Ref(int32(e.jarg(b, 1)))); o != nil {
+			if a, ok := o.Value.([]dvm.Ref); ok {
+				if i := int(int32(e.jarg(b, 2))); i >= 0 && i < len(a) {
+					ret = uint64(a[i])
+				}
+			}
+		}
+	case jniSetObjectArrayElement: // (jobjectArray, jsize idx, jobject val)
+		if o := e.vm.Deref(dvm.Ref(int32(e.jarg(b, 1)))); o != nil {
+			if a, ok := o.Value.([]dvm.Ref); ok {
+				if i := int(int32(e.jarg(b, 2))); i >= 0 && i < len(a) {
+					a[i] = dvm.Ref(int32(e.jarg(b, 3)))
+				}
 			}
 		}
 	case jniNewByteArray:
@@ -271,10 +328,49 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 	case jniNewGlobalRef, jniNewLocalRef:
 		ret = e.jarg(b, 1) // same handle
 
-	case jniExceptionCheck, jniExceptionOccurred:
-		ret = 0 // no pending exception
-	case jniExceptionClear, jniExceptionDescribe, jniDeleteGlobalRef, jniDeleteLocalRef:
+	case 13, 14: // Throw, ThrowNew -> record a pending exception
+		e.pendingExc = true
+		detail = "(pending exception set)"
+	case jniExceptionCheck: // jboolean
+		if e.pendingExc {
+			ret = 1
+		}
+	case jniExceptionOccurred: // jthrowable (non-null handle if pending)
+		if e.pendingExc {
+			ret = 1
+		}
+	case jniExceptionClear, jniExceptionDescribe:
+		e.pendingExc = false
+	case jniDeleteGlobalRef, jniDeleteLocalRef:
 		ret = 0
+
+	case 28, 29, 30: // NewObject[V/A](clazz, methodID, ...) -> fresh boxed object
+		if cls := e.derefClass(e.jarg(b, 1)); cls != nil {
+			ret = uint64(e.vm.NewObject(cls, nil))
+		}
+
+	case 217, 218: // MonitorEnter / MonitorExit
+		ret = 0
+
+	case 165: // GetStringChars (jstring, isCopy*) -> jchar* (UTF-16LE)
+		ret = e.WriteScratch(append(utf16le(e.gstr(e.jarg(b, 1))), 0, 0))
+		if cp := e.jarg(b, 2); cp != 0 {
+			_ = e.be.MemWrite(cp, []byte{1})
+		}
+	case 166: // ReleaseStringChars
+		ret = 0
+	case 220: // GetStringRegion(str, start, len, buf) -> UTF-16LE into buf
+		r := []rune(e.gstr(e.jarg(b, 1)))
+		start, ln, buf := int(e.jarg(b, 2)), int(e.jarg(b, 3)), e.jarg(b, 4)
+		if start >= 0 && start+ln <= len(r) {
+			_ = e.be.MemWrite(buf, utf16le(string(r[start:start+ln])))
+		}
+	case 221: // GetStringUTFRegion(str, start, len, buf) -> UTF-8 into buf
+		r := []rune(e.gstr(e.jarg(b, 1)))
+		start, ln, buf := int(e.jarg(b, 2)), int(e.jarg(b, 3)), e.jarg(b, 4)
+		if start >= 0 && start+ln <= len(r) {
+			_ = e.be.MemWrite(buf, append([]byte(string(r[start:start+ln])), 0))
+		}
 
 	case jniGetJavaVM:
 		// (JNIEnv*, JavaVM** out) -> *out = javaVM, return 0

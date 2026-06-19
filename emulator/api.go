@@ -103,15 +103,29 @@ type Hook struct{ e *Emulator }
 // Emu returns the emulator, for memory access inside a Replace callback.
 func (h *Hook) Emu() *Emulator { return h.e }
 
-// Arg returns integer argument i (0-based, X0..X7).
+// Arg returns integer argument / register Xi (0-based, X0..X7).
 func (h *Hook) Arg(i int) uint64 {
-	regs := []emu.Reg{emu.RegX0, emu.RegX1, emu.RegX2, emu.RegX3, emu.RegX4, emu.RegX5, emu.RegX6, emu.RegX7}
-	if i < 0 || i >= len(regs) {
+	if i < 0 || i > 7 {
 		return 0
 	}
-	v, _ := h.e.be.RegRead(regs[i])
+	v, _ := h.e.be.RegRead(emu.RegX0 + emu.Reg(i))
 	return v
 }
+
+// SetArg sets register Xi (0..7) — e.g. to rewrite an argument from an inline hook.
+func (h *Hook) SetArg(i int, v uint64) {
+	if i >= 0 && i <= 7 {
+		_ = h.e.be.RegWrite(emu.RegX0+emu.Reg(i), v)
+	}
+}
+
+// PC / SP / LR read those registers (handy inside an inline hook).
+func (h *Hook) PC() uint64 { v, _ := h.e.be.RegRead(emu.RegPC); return v }
+func (h *Hook) SP() uint64 { v, _ := h.e.be.RegRead(emu.RegSP); return v }
+func (h *Hook) LR() uint64 { v, _ := h.e.be.RegRead(emu.RegLR); return v }
+
+// SetPC redirects execution (e.g. skip an instruction, jump elsewhere).
+func (h *Hook) SetPC(v uint64) { _ = h.e.be.RegWrite(emu.RegPC, v) }
 
 // ReplaceFunc is a Go stand-in for a native function; its return value is the
 // function's return (X0).
@@ -139,6 +153,37 @@ func (e *Emulator) ReplaceSymbol(name string, fn ReplaceFunc) error {
 	}
 	e.Replace(addr, fn)
 	return nil
+}
+
+// ---- inline hooks ----------------------------------------------------------
+
+// HookAddr installs an inline hook that fires every time guest PC reaches addr
+// (mid-function, not just at the entry like Replace). The callback reads/edits
+// registers via *Hook — rewrite an argument, capture a value, or SetPC to skip
+// or redirect. Returns a remover.
+//
+// Requires the Unicorn engine: dynarmic is a block JIT with no per-instruction
+// hook, so HookAddr errors there (use Replace for function-entry interception).
+func (e *Emulator) HookAddr(addr uint64, fn func(h *Hook)) (func(), error) {
+	if e.engine != "unicorn" {
+		return nil, fmt.Errorf("HookAddr: inline hooks require the unicorn engine (current %q); use Replace for entry hooks", e.engine)
+	}
+	h, err := e.be.HookCode(addr, addr, func(b emu.Backend, a uint64, size uint32) {
+		fn(&Hook{e})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = h.Remove() }, nil
+}
+
+// HookSymbol is HookAddr by exported symbol name.
+func (e *Emulator) HookSymbol(name string, fn func(h *Hook)) (func(), error) {
+	addr, ok := e.Sym(name)
+	if !ok {
+		return nil, fmt.Errorf("symbol %q not found", name)
+	}
+	return e.HookAddr(addr, fn)
 }
 
 // ---- tracing ---------------------------------------------------------------

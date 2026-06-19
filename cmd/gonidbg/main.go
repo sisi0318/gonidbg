@@ -6,6 +6,7 @@
 //	gonidbg [-engine unicorn|dynarmic] [-assets DIR] [-v] <lib.so> <symbol> [intarg...]
 //
 // Example:
+//
 //	gonidbg examples/native/native.so add 2 3      ->  add(...) = 5
 package main
 

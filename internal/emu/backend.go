@@ -50,7 +50,7 @@ const (
 	RegX23 // used by the crypto register-dump hook in the host app
 	RegSP
 	RegPC
-	RegLR  // X30
+	RegLR // X30
 	RegNZCV
 	RegTPIDR_EL0
 )
