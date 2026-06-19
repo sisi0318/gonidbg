@@ -1,0 +1,20 @@
+# Normalize line endings so clones build everywhere.
+* text=auto
+
+# Unix shell scripts MUST stay LF (CRLF breaks bash on Linux/macOS).
+*.sh    text eol=lf
+# Source / docs: LF.
+*.go    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.cpp   text eol=lf
+*.md    text eol=lf
+*.mod   text eol=lf
+*.yml   text eol=lf
+# Windows-native scripts: CRLF.
+*.ps1   text eol=crlf
+
+# Binaries: never touch.
+*.so    binary
+*.apk   binary
+*.png   binary

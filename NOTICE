@@ -1,0 +1,43 @@
+gonidbg
+Copyright 2026 The gonidbg Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Bundled third-party binaries (under assets/android/sdk23/)
+--------------------------------------------------------------------------------
+
+To emulate Android native libraries, this project bundles a small Android (AOSP)
+AArch64 sysroot. These are third-party binaries, redistributed under their
+respective licenses:
+
+  - bionic libc.so / libm.so / libdl.so / liblog.so / libstdc++ (libstdcpp.so,
+    libcpp.so) — The Android Open Source Project, Apache License 2.0.
+  - libcrypto.so / libssl.so — BoringSSL / OpenSSL-derived, under their
+    respective (OpenSSL/ISC/SSLeay) licenses.
+  - libz.so — zlib, under the zlib license.
+
+These libraries are unmodified system components included only so the emulator
+can resolve and execute the standard C runtime an Android native library expects.
+All trademarks and copyrights in those components belong to their respective
+owners.
+
+--------------------------------------------------------------------------------
+Interoperating projects (NOT distributed with this source)
+--------------------------------------------------------------------------------
+
+gonidbg is designed after, and interoperates with, these projects. Their code is
+fetched/built or loaded separately, not vendored in this repository:
+
+  - unidbg          (Apache-2.0)  — the design reimplemented here.
+  - Unicorn Engine  (GPLv2)       — optional CPU backend, loaded at runtime via
+                                    dlopen (kept at a dynamic-library boundary).
+  - dynarmic        (0BSD)        — optional CPU backend, fetched + statically
+                                    built by build-dynarmic.sh.
+
+--------------------------------------------------------------------------------
+Example library
+--------------------------------------------------------------------------------
+
+examples/native/native.so is built from examples/native/native.c (in this repo)
+and is original to this project.

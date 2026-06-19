@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # Pure-Go layer: builds and tests anywhere, no CPU engine, no cgo.
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build (pure Go)
+        run: CGO_ENABLED=0 go build ./...
+      - name: Vet (pure Go)
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Test (pure Go — linker vs bundled bionic, memory allocator)
+        run: CGO_ENABLED=0 go test ./...
+
+  # Engine layer: run the integration test on the Unicorn backend. libunicorn 2.x
+  # comes from apt (headers in /usr/include, libunicorn.so.2 on the default search
+  # path), so the runtime-loaded shim finds it with no extra env.
+  # (The dynarmic backend isn't built in CI — it needs the heavier from-source
+  # static build via build-dynarmic.sh; build it locally.)
+  engine-unicorn:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Install libunicorn 2.x
+        run: sudo apt-get update && sudo apt-get install -y libunicorn-dev
+      - name: Test with the Unicorn engine
+        run: CGO_ENABLED=1 go test -tags unicorn ./...

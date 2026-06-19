@@ -1,0 +1,23 @@
+# build outputs
+/bin/
+/dist/
+*.exe
+*.o
+*.obj
+
+# engine vendor dirs (created by build scripts on the host)
+/dynvendor/
+/.zigcache/
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# keep examples/native/native.so — it's a committed test/demo fixture
+
+# never commit third-party / proprietary target libraries (bring-your-own)
+/dy/
+**/libmetasec*.so
+examples/douyin/*.so
+*.apk
