@@ -169,6 +169,14 @@ func (b *unicornBackend) RegWrite(r Reg, val uint64) error {
 	return nil
 }
 
+func (b *unicornBackend) ReadGPRegs() ([34]uint64, error) {
+	var out [34]uint64
+	if e := C.ucs_read_gpregs(b.e, (*C.uint64_t)(unsafe.Pointer(&out[0]))); e != C.UC_ERR_OK {
+		return out, ucErr("read_gpregs", e)
+	}
+	return out, nil
+}
+
 func (b *unicornBackend) MemMap(addr, size uint64, prot int) error {
 	if e := C.ucs_mem_map(b.e, C.uint64_t(addr), C.size_t(size), C.uint32_t(prot)); e != C.UC_ERR_OK {
 		return ucErr("mem_map", e)

@@ -102,7 +102,20 @@ static bool mem_tramp(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, 
 enum {
 	OP_REGREAD=1, OP_REGWRITE, OP_MAP, OP_UNMAP, OP_PROTECT, OP_WRITE, OP_READ,
 	OP_START, OP_STOP, OP_HOOKCODE, OP_HOOKINTR, OP_HOOKMEM, OP_HOOKDEL, OP_FLUSH,
-	OP_CTXALLOC, OP_CTXSAVE, OP_CTXRESTORE, OP_CTXFREE, OP_QUIT
+	OP_CTXALLOC, OP_CTXSAVE, OP_CTXRESTORE, OP_CTXFREE, OP_READGP, OP_QUIT
+};
+
+// GP register ids read by OP_READGP, in trace order: x0..x30, sp, pc, nzcv.
+static const int GP_REG_IDS[34] = {
+	UC_ARM64_REG_X0,  UC_ARM64_REG_X1,  UC_ARM64_REG_X2,  UC_ARM64_REG_X3,
+	UC_ARM64_REG_X4,  UC_ARM64_REG_X5,  UC_ARM64_REG_X6,  UC_ARM64_REG_X7,
+	UC_ARM64_REG_X8,  UC_ARM64_REG_X9,  UC_ARM64_REG_X10, UC_ARM64_REG_X11,
+	UC_ARM64_REG_X12, UC_ARM64_REG_X13, UC_ARM64_REG_X14, UC_ARM64_REG_X15,
+	UC_ARM64_REG_X16, UC_ARM64_REG_X17, UC_ARM64_REG_X18, UC_ARM64_REG_X19,
+	UC_ARM64_REG_X20, UC_ARM64_REG_X21, UC_ARM64_REG_X22, UC_ARM64_REG_X23,
+	UC_ARM64_REG_X24, UC_ARM64_REG_X25, UC_ARM64_REG_X26, UC_ARM64_REG_X27,
+	UC_ARM64_REG_X28, UC_ARM64_REG_X29, UC_ARM64_REG_X30,
+	UC_ARM64_REG_SP,  UC_ARM64_REG_PC,  UC_ARM64_REG_NZCV,
 };
 
 typedef struct {
@@ -155,6 +168,16 @@ static void ucs_dispatch(ucs_engine *e, ucs_cmd *c){
 	case OP_CTXSAVE:    c->ret = P_ctxsave ? P_ctxsave(uc, (uc_context*)(uintptr_t)c->a0) : UC_ERR_HANDLE; break;
 	case OP_CTXRESTORE: c->ret = P_ctxrestore ? P_ctxrestore(uc, (uc_context*)(uintptr_t)c->a0) : UC_ERR_HANDLE; break;
 	case OP_CTXFREE:    c->ret = P_ctxfree ? P_ctxfree((uc_context*)(uintptr_t)c->a0) : UC_ERR_OK; break;
+	case OP_READGP: {
+		uint64_t *out = (uint64_t*)c->ptr;
+		uc_err rr = UC_ERR_OK;
+		for (int i = 0; i < 34; i++) {
+			uc_err e1 = P_rr(uc, GP_REG_IDS[i], &out[i]);
+			if (e1 != UC_ERR_OK) rr = e1;
+		}
+		c->ret = rr;
+		break;
+	}
 	default:          c->ret = UC_ERR_ARG; break;
 	}
 }
@@ -293,6 +316,10 @@ uc_err ucs_context_restore(ucs_engine *e, void *ctx){
 void ucs_context_free(ucs_engine *e, void *ctx){
 	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_CTXFREE; c.a0=(uint64_t)(uintptr_t)ctx;
 	ucs_run(e,&c);
+}
+uc_err ucs_read_gpregs(ucs_engine *e, uint64_t *out){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_READGP; c.ptr=out;
+	ucs_run(e,&c); return c.ret;
 }
 uc_err ucs_hook_code(ucs_engine *e, uint64_t *out, uint64_t b, uint64_t en, uint64_t cbid){
 	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_HOOKCODE; c.a0=b; c.a1=en; c.cbid=cbid;

@@ -68,6 +68,11 @@ type Backend interface {
 	// Registers
 	RegRead(reg Reg) (uint64, error)
 	RegWrite(reg Reg, val uint64) error
+	// ReadGPRegs returns the whole general-purpose register file in one call:
+	// [0..30] = x0..x30, [31] = sp, [32] = pc, [33] = nzcv. Cheap enough to call
+	// per instruction (used by the full instruction tracer); individual RegReads
+	// would be far too slow across the cgo boundary.
+	ReadGPRegs() ([34]uint64, error)
 
 	// Memory
 	MemMap(addr, size uint64, prot int) error

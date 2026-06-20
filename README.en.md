@@ -40,7 +40,7 @@ unidbg is the de-facto tool for emulating Android native libraries, but it runs 
 - **Console debugger**: breakpoints / single-step / registers / memory (Unicorn; I/O is injectable for scripting).
 - Load **real class/method/field metadata from a classes.dex** (`Config.DexPath` / `LoadDex`): FindClass/GetMethodID/GetFieldID resolve against true signatures and superclasses (metadata only, no bytecode).
 - Memory helpers: alloc, read/write bytes, C-strings, and LE integers.
-- Per-instruction trace (Unicorn).
+- Per-instruction trace, plus a full instruction-stream trace (`TraceInsns`: per-instruction offset + opcode + register deltas + call/syscall annotations, Tenet-style, diffable against a real-device trace; Unicorn).
 - Selectable engine: build with `-tags unicorn`, `-tags dynarmic`, or both, and choose at runtime with `-engine` / `$GONIDBG_ENGINE`.
 
 ## Quick start

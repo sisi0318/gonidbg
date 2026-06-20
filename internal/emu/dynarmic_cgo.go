@@ -128,6 +128,14 @@ func (b *dynarmicBackend) RegWrite(r Reg, val uint64) error {
 	return dynErr("reg_write", C.dyn_reg_write(b.e, dynRegMap(r), C.uint64_t(val)))
 }
 
+func (b *dynarmicBackend) ReadGPRegs() ([34]uint64, error) {
+	var out [34]uint64
+	if e := C.dyn_read_gpregs(b.e, (*C.uint64_t)(unsafe.Pointer(&out[0]))); e != C.DYN_OK {
+		return out, dynErr("read_gpregs", e)
+	}
+	return out, nil
+}
+
 func (b *dynarmicBackend) MemMap(addr, size uint64, prot int) error {
 	return dynErr("mem_map", C.dyn_mem_map(b.e, C.uint64_t(addr), C.uint64_t(size), C.uint32_t(prot)))
 }

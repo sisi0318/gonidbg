@@ -32,6 +32,7 @@ func main() {
 	so := flag.String("so", "dy/libmetasec_ml.so", "path to libmetasec_ml.so (NOT included with gonidbg — bring your own)")
 	engine := flag.String("engine", "", "CPU engine: unicorn | dynarmic (default: auto)")
 	verbose := flag.Bool("v", false, "verbose syscall/JNI tracing")
+	traceFile := flag.String("trace", "", "write a full instruction trace of the sign call to this file (unicorn engine only)")
 	flag.Parse()
 
 	if _, err := os.Stat(*so); err != nil {
@@ -60,7 +61,25 @@ func main() {
 	url := "https://api5-core-lf.amemv.com/aweme/v2/feed/?app_name=aweme&aid=1128"
 	cookie := "content-type\r\napplication/json; charset=UTF-8\r\n"
 
+	// Optionally record a full instruction trace of the sign call (every guest
+	// instruction the .so executes, with register deltas + call/syscall symbols).
+	var stopTrace func()
+	if *traceFile != "" {
+		stop, err := startTrace(e, *traceFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "trace:", err)
+			os.Exit(1)
+		}
+		stopTrace = stop
+	}
+
 	raw, err := sign(e, url, cookie)
+	if stopTrace != nil {
+		stopTrace() // remove the hook and flush the trace before reporting
+		if fi, statErr := os.Stat(*traceFile); statErr == nil {
+			fmt.Printf("instruction trace -> %s (%d bytes)\n\n", *traceFile, fi.Size())
+		}
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sign:", err)
 		os.Exit(1)
@@ -94,6 +113,28 @@ func sign(e *emulator.Emulator, url, cookie string) (string, error) {
 		return "", fmt.Errorf("sign returned NULL (check inputs / JNI handler)")
 	}
 	return e.ReadCStr(addr)
+}
+
+// startTrace installs a full instruction-stream tracer over the main module and
+// returns a stop function that removes the hook and flushes the trace. It traces
+// the .so's own code range (module-relative offsets), so the output captures the
+// signing algorithm itself without libc/linker noise — exactly the form you'd
+// diff against an on-device Frida/Tenet trace. Unicorn engine only.
+func startTrace(e *emulator.Emulator, path string) (func(), error) {
+	m := e.MainModule()
+	if m == nil {
+		return nil, fmt.Errorf("no main module loaded")
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	stop, err := e.TraceInsns(f, m.Base, m.Base+m.Img.LoadSpan, m.Base)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { stop(); f.Close() }, nil
 }
 
 // parseHeaders splits the "key\nvalue\nkey\nvalue..." blob into a map.

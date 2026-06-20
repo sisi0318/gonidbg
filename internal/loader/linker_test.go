@@ -49,6 +49,7 @@ func (m *memBE) MemUnmap(uint64, uint64) error           { return nil }
 func (m *memBE) MemProtect(uint64, uint64, int) error    { return nil }
 func (m *memBE) RegRead(emu.Reg) (uint64, error)         { return 0, nil }
 func (m *memBE) RegWrite(emu.Reg, uint64) error          { return nil }
+func (m *memBE) ReadGPRegs() ([34]uint64, error)         { return [34]uint64{}, nil }
 func (m *memBE) Start(uint64, uint64) error              { return nil }
 func (m *memBE) StartCount(uint64, uint64, uint64) error { return nil }
 func (m *memBE) Stop() error                             { return nil }

@@ -302,6 +302,17 @@ int dyn_reg_read(dyn_engine *h, int regid, uint64_t *val) {
 	return DYN_ERR_REG;
 }
 
+int dyn_read_gpregs(dyn_engine *h, uint64_t *out) {
+	Engine *e = reinterpret_cast<Engine *>(h);
+	if (!e || !out) return DYN_ERR;
+	auto regs = e->jit->GetRegisters(); // x0..x30
+	for (int i = 0; i < 31; i++) out[i] = regs[i];
+	out[31] = e->jit->GetSP();
+	out[32] = e->jit->GetPC();
+	out[33] = e->jit->GetPstate() & 0xF0000000u;
+	return DYN_OK;
+}
+
 int dyn_reg_write(dyn_engine *h, int regid, uint64_t val) {
 	Engine *e = reinterpret_cast<Engine *>(h);
 	if (regid >= 0 && regid <= 30) { e->jit->SetRegister((size_t)regid, val); return DYN_OK; }

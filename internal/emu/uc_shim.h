@@ -26,6 +26,9 @@ void        ucs_free(ucs_engine *e);
 
 uc_err ucs_reg_read(ucs_engine *e, int regid, uint64_t *val);
 uc_err ucs_reg_write(ucs_engine *e, int regid, uint64_t val);
+// ucs_read_gpregs reads the GP register file in one engine-thread round-trip:
+// out[0..30]=x0..x30, out[31]=sp, out[32]=pc, out[33]=nzcv. (For the tracer.)
+uc_err ucs_read_gpregs(ucs_engine *e, uint64_t *out);
 uc_err ucs_mem_map(ucs_engine *e, uint64_t addr, size_t size, uint32_t prot);
 uc_err ucs_mem_unmap(ucs_engine *e, uint64_t addr, size_t size);
 uc_err ucs_mem_protect(ucs_engine *e, uint64_t addr, size_t size, uint32_t prot);

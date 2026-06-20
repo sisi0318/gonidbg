@@ -43,6 +43,8 @@ const char *dyn_strerror(int code);
 
 int dyn_reg_read(dyn_engine *e, int regid, uint64_t *val);
 int dyn_reg_write(dyn_engine *e, int regid, uint64_t val);
+// dyn_read_gpregs fills out[0..30]=x0..x30, out[31]=sp, out[32]=pc, out[33]=nzcv.
+int dyn_read_gpregs(dyn_engine *e, uint64_t *out);
 
 int dyn_mem_map(dyn_engine *e, uint64_t addr, uint64_t size, uint32_t prot);
 int dyn_mem_unmap(dyn_engine *e, uint64_t addr, uint64_t size);
