@@ -45,14 +45,17 @@ func (m *memBE) MemRead(addr, size uint64) ([]byte, error) {
 	}
 	return out, nil
 }
-func (m *memBE) MemUnmap(uint64, uint64) error        { return nil }
-func (m *memBE) MemProtect(uint64, uint64, int) error { return nil }
-func (m *memBE) RegRead(emu.Reg) (uint64, error)      { return 0, nil }
-func (m *memBE) RegWrite(emu.Reg, uint64) error       { return nil }
-func (m *memBE) Start(uint64, uint64) error           { return nil }
-func (m *memBE) Stop() error                          { return nil }
-func (m *memBE) FlushCache() error                    { return nil }
-func (m *memBE) Close() error                         { return nil }
+func (m *memBE) MemUnmap(uint64, uint64) error           { return nil }
+func (m *memBE) MemProtect(uint64, uint64, int) error    { return nil }
+func (m *memBE) RegRead(emu.Reg) (uint64, error)         { return 0, nil }
+func (m *memBE) RegWrite(emu.Reg, uint64) error          { return nil }
+func (m *memBE) Start(uint64, uint64) error              { return nil }
+func (m *memBE) StartCount(uint64, uint64, uint64) error { return nil }
+func (m *memBE) Stop() error                             { return nil }
+func (m *memBE) SaveContext() (emu.CPUContext, error)    { return nil, nil }
+func (m *memBE) RestoreContext(emu.CPUContext) error     { return nil }
+func (m *memBE) FlushCache() error                       { return nil }
+func (m *memBE) Close() error                            { return nil }
 func (m *memBE) HookCode(uint64, uint64, emu.CodeHookFunc) (emu.HookHandle, error) {
 	return nil, nil
 }

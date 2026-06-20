@@ -83,7 +83,19 @@ type Backend interface {
 
 	// Execution
 	Start(begin, until uint64) error
+	// StartCount runs at most `count` instructions (0 = unlimited), then returns
+	// — used by the cooperative scheduler to preempt a thread slice. Backends
+	// without an instruction limit may treat it as unlimited.
+	StartCount(begin, until, count uint64) error
 	Stop() error
+
+	// SaveContext snapshots the entire guest CPU register file (all GP + SIMD
+	// registers, SP, PC, PSTATE, TPIDR) into an opaque handle; RestoreContext
+	// reloads it. Used to suspend and resume guest threads (fibers). A backend
+	// that can't do this returns an error and the scheduler degrades to a
+	// single-slice (non-resumable) run.
+	SaveContext() (CPUContext, error)
+	RestoreContext(CPUContext) error
 
 	// FlushCache invalidates the engine's translated/JIT'd code cache. Call after
 	// writing new code into an executable region (self-modifying code / Replace),
@@ -95,3 +107,7 @@ type Backend interface {
 
 // HookHandle lets a hook be removed.
 type HookHandle interface{ Remove() error }
+
+// CPUContext is an opaque, backend-specific snapshot of the full guest CPU
+// register file (see Backend.SaveContext). Free releases it.
+type CPUContext interface{ Free() error }

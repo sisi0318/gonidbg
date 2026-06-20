@@ -179,7 +179,7 @@ Not yet (roadmap, and PRs are welcome):
 - JNI and syscalls are still subsets: they cover common usage, not all ~232 JNI slots or the full syscall table.
 - DEX is metadata-only. It parses classes/methods/fields (signatures, superclasses) so FindClass/GetMethodID/GetFieldID resolve, but it does not execute DEX bytecode (no JVM); model Java-side behavior with a `dvm.Jni` handler.
 - Inline hooks and the console debugger require the Unicorn engine (dynarmic is a block JIT with no per-instruction hook).
-- Real threads (`pthread_create` is a no-op), signals, and iOS / Mach-O.
+- Truly concurrent threads (there is now a single-core cooperative scheduler — `pthread_create` makes a fiber, the scheduler time-slices and saves/restores CPU context at futex/sleep — but not real concurrency), signals, and iOS / Mach-O.
 
 ## Building from source / engines
 

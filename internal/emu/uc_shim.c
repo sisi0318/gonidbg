@@ -32,6 +32,10 @@ typedef uc_err (*pf_hook_del)(uc_engine *, uc_hook);
 typedef unsigned int (*pf_version)(unsigned int *, unsigned int *);
 typedef const char *(*pf_strerror)(uc_err);
 typedef uc_err (*pf_ctl)(uc_engine *, int, ...);
+typedef uc_err (*pf_ctx_alloc)(uc_engine *, uc_context **);
+typedef uc_err (*pf_ctx_save)(uc_engine *, uc_context *);
+typedef uc_err (*pf_ctx_restore)(uc_engine *, uc_context *);
+typedef uc_err (*pf_ctx_free)(uc_context *);
 
 static pf_open P_open; static pf_close P_close;
 static pf_reg_read P_rr; static pf_reg_write P_rw;
@@ -41,6 +45,8 @@ static pf_emu_start P_start; static pf_emu_stop P_stop;
 static pf_hook_add P_hadd; static pf_hook_del P_hdel;
 static pf_version P_ver; static pf_strerror P_serr;
 static pf_ctl P_ctl;
+static pf_ctx_alloc P_ctxalloc; static pf_ctx_save P_ctxsave;
+static pf_ctx_restore P_ctxrestore; static pf_ctx_free P_ctxfree;
 
 int ucs_load(const char *path) {
 	const char *env = getenv("GONIDBG_UNICORN");
@@ -64,6 +70,11 @@ int ucs_load(const char *path) {
 	P_hadd=(pf_hook_add)dlfn(h,"uc_hook_add"); P_hdel=(pf_hook_del)dlfn(h,"uc_hook_del");
 	P_ver=(pf_version)dlfn(h,"uc_version");    P_serr=(pf_strerror)dlfn(h,"uc_strerror");
 	P_ctl=(pf_ctl)dlfn(h,"uc_ctl"); // optional (FlushCache); absent only on very old builds
+	// optional (cooperative scheduler context save/restore); absent only on very old builds
+	P_ctxalloc=(pf_ctx_alloc)dlfn(h,"uc_context_alloc");
+	P_ctxsave=(pf_ctx_save)dlfn(h,"uc_context_save");
+	P_ctxrestore=(pf_ctx_restore)dlfn(h,"uc_context_restore");
+	P_ctxfree=(pf_ctx_free)dlfn(h,"uc_context_free");
 	if (!P_open||!P_close||!P_rr||!P_rw||!P_map||!P_unmap||!P_prot||
 	    !P_mw||!P_mr||!P_start||!P_stop||!P_hadd||!P_hdel) return 2;
 	return 0;
@@ -90,7 +101,8 @@ static bool mem_tramp(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, 
 // ---- command model ---------------------------------------------------------
 enum {
 	OP_REGREAD=1, OP_REGWRITE, OP_MAP, OP_UNMAP, OP_PROTECT, OP_WRITE, OP_READ,
-	OP_START, OP_STOP, OP_HOOKCODE, OP_HOOKINTR, OP_HOOKMEM, OP_HOOKDEL, OP_FLUSH, OP_QUIT
+	OP_START, OP_STOP, OP_HOOKCODE, OP_HOOKINTR, OP_HOOKMEM, OP_HOOKDEL, OP_FLUSH,
+	OP_CTXALLOC, OP_CTXSAVE, OP_CTXRESTORE, OP_CTXFREE, OP_QUIT
 };
 
 typedef struct {
@@ -134,6 +146,15 @@ static void ucs_dispatch(ucs_engine *e, ucs_cmd *c){
 	case OP_HOOKMEM:  c->ret = P_hadd(uc,&hh,UC_HOOK_MEM_UNMAPPED|UC_HOOK_MEM_PROT,(void*)mem_tramp,(void*)(uintptr_t)c->cbid,(uint64_t)1,(uint64_t)0); c->rval=(uint64_t)hh; break;
 	case OP_HOOKDEL:  c->ret = P_hdel(uc, (uc_hook)c->a0); break;
 	case OP_FLUSH:    c->ret = P_ctl ? P_ctl(uc, UC_CTL_WRITE(UC_CTL_TB_FLUSH, 0)) : UC_ERR_OK; break;
+	case OP_CTXALLOC: {
+		uc_context *ctx = NULL;
+		c->ret = P_ctxalloc ? P_ctxalloc(uc, &ctx) : UC_ERR_HANDLE;
+		c->rval = (uint64_t)(uintptr_t)ctx;
+		break;
+	}
+	case OP_CTXSAVE:    c->ret = P_ctxsave ? P_ctxsave(uc, (uc_context*)(uintptr_t)c->a0) : UC_ERR_HANDLE; break;
+	case OP_CTXRESTORE: c->ret = P_ctxrestore ? P_ctxrestore(uc, (uc_context*)(uintptr_t)c->a0) : UC_ERR_HANDLE; break;
+	case OP_CTXFREE:    c->ret = P_ctxfree ? P_ctxfree((uc_context*)(uintptr_t)c->a0) : UC_ERR_OK; break;
 	default:          c->ret = UC_ERR_ARG; break;
 	}
 }
@@ -256,6 +277,22 @@ uc_err ucs_emu_stop(ucs_engine *e){
 uc_err ucs_flush_tb(ucs_engine *e){
 	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_FLUSH;
 	ucs_run(e,&c); return c.ret;
+}
+void *ucs_context_alloc(ucs_engine *e, uc_err *err){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_CTXALLOC;
+	ucs_run(e,&c); if (err) *err = c.ret; return (void*)(uintptr_t)c.rval;
+}
+uc_err ucs_context_save(ucs_engine *e, void *ctx){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_CTXSAVE; c.a0=(uint64_t)(uintptr_t)ctx;
+	ucs_run(e,&c); return c.ret;
+}
+uc_err ucs_context_restore(ucs_engine *e, void *ctx){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_CTXRESTORE; c.a0=(uint64_t)(uintptr_t)ctx;
+	ucs_run(e,&c); return c.ret;
+}
+void ucs_context_free(ucs_engine *e, void *ctx){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_CTXFREE; c.a0=(uint64_t)(uintptr_t)ctx;
+	ucs_run(e,&c);
 }
 uc_err ucs_hook_code(ucs_engine *e, uint64_t *out, uint64_t b, uint64_t en, uint64_t cbid){
 	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_HOOKCODE; c.a0=b; c.a1=en; c.cbid=cbid;

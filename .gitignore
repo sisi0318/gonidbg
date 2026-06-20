@@ -21,3 +21,7 @@
 **/libmetasec*.so
 examples/douyin/*.so
 *.apk
+examples/unidbg-qsign-master/*
+examples/qsign/**
+
+config.json

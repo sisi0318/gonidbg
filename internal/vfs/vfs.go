@@ -19,7 +19,15 @@ type VFS struct {
 	synth     map[string]func() ([]byte, error) // guest path -> generator
 	pid       int
 	procName  string // emulated process name (/proc/self/cmdline, status)
+	// fallback is consulted after synth + asset mappings miss. (content, true,
+	// err) supplies/denies a path; (nil, false, nil) falls through. Set by the
+	// emulator from Config.FileResolver.
+	fallback func(guest string) ([]byte, bool, error)
 }
+
+// SetFallback installs a last-resort resolver for guest paths the built-in
+// synthetic + asset mappings don't cover (the host app's IOResolver).
+func (v *VFS) SetFallback(fn func(guest string) ([]byte, bool, error)) { v.fallback = fn }
 
 // New roots the VFS at the extracted asset directory (the parent of
 // "android/sdk23"). sdk level 23, ARM64 => lib64. procName is the emulated
@@ -56,6 +64,15 @@ func (v *VFS) hostPath(guest string) string {
 // first, then static asset mappings.
 func (v *VFS) Read(guest string) ([]byte, error) {
 	guest = path.Clean(guest)
+	// The host app's resolver wins (unidbg's IOResolver runs before the built-in
+	// /proc generators) so it can override e.g. /proc/self/maps with a curated
+	// blob. Only consulted when set (Config.FileResolver), so default behavior is
+	// unchanged.
+	if v.fallback != nil {
+		if data, ok, err := v.fallback(guest); ok {
+			return data, err
+		}
+	}
 	if gen, ok := v.synth[guest]; ok {
 		return gen()
 	}
@@ -74,6 +91,11 @@ func (v *VFS) Exists(guest string) bool {
 	if hp := v.hostPath(guest); hp != "" {
 		_, err := os.Stat(hp)
 		return err == nil
+	}
+	if v.fallback != nil {
+		if _, ok, err := v.fallback(guest); ok && err == nil {
+			return true
+		}
 	}
 	return false
 }

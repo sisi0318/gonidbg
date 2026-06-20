@@ -9,6 +9,7 @@
 #include "dynarmic/interface/exclusive_monitor.h"
 #include "dynarmic/interface/halt_reason.h"
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -367,5 +368,48 @@ void dyn_flush_cache(dyn_engine *h) {
 
 void dyn_set_intr_cb(dyn_engine *h, uint64_t cbid) { reinterpret_cast<Engine *>(h)->intr_cbid = cbid; }
 void dyn_set_mem_cb(dyn_engine *h, uint64_t cbid)  { reinterpret_cast<Engine *>(h)->mem_cbid = cbid; }
+
+// ---- CPU context save/restore (cooperative thread switching) ---------------
+// A full snapshot of the architectural register file. Vectors + FPCR/FPSR are
+// included so a thread suspended mid-SIMD (crypto) resumes correctly.
+struct DynContext {
+	std::array<std::uint64_t, 31> regs;
+	std::array<A64::Vector, 32> vecs;
+	std::uint64_t sp = 0, pc = 0, tpidr = 0;
+	std::uint32_t pstate = 0, fpcr = 0, fpsr = 0;
+};
+
+void *dyn_context_alloc(void) { return new (std::nothrow) DynContext(); }
+void  dyn_context_free(void *ctx) { delete reinterpret_cast<DynContext *>(ctx); }
+
+int dyn_context_save(dyn_engine *h, void *ctx) {
+	Engine *e = reinterpret_cast<Engine *>(h);
+	DynContext *c = reinterpret_cast<DynContext *>(ctx);
+	if (!e || !c) return DYN_ERR;
+	c->regs = e->jit->GetRegisters();
+	c->vecs = e->jit->GetVectors();
+	c->sp = e->jit->GetSP();
+	c->pc = e->jit->GetPC();
+	c->pstate = e->jit->GetPstate();
+	c->tpidr = e->tpidr_el0;
+	c->fpcr = e->jit->GetFpcr();
+	c->fpsr = e->jit->GetFpsr();
+	return DYN_OK;
+}
+
+int dyn_context_restore(dyn_engine *h, void *ctx) {
+	Engine *e = reinterpret_cast<Engine *>(h);
+	DynContext *c = reinterpret_cast<DynContext *>(ctx);
+	if (!e || !c) return DYN_ERR;
+	e->jit->SetRegisters(c->regs);
+	e->jit->SetVectors(c->vecs);
+	e->jit->SetSP(c->sp);
+	e->jit->SetPC(c->pc);
+	e->jit->SetPstate(c->pstate);
+	e->tpidr_el0 = c->tpidr;
+	e->jit->SetFpcr(c->fpcr);
+	e->jit->SetFpsr(c->fpsr);
+	return DYN_OK;
+}
 
 } // extern "C"

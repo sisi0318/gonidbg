@@ -251,9 +251,54 @@ func (b *unicornBackend) Start(begin, until uint64) error {
 	return nil
 }
 
+func (b *unicornBackend) StartCount(begin, until, count uint64) error {
+	if e := C.ucs_emu_start(b.e, C.uint64_t(begin), C.uint64_t(until), 0, C.size_t(count)); e != C.UC_ERR_OK {
+		return ucErr("emu_start", e)
+	}
+	return nil
+}
+
 func (b *unicornBackend) Stop() error {
 	if e := C.ucs_emu_stop(b.e); e != C.UC_ERR_OK {
 		return ucErr("emu_stop", e)
+	}
+	return nil
+}
+
+// ucContext wraps a uc_context* (engine-allocated full CPU snapshot).
+type ucContext struct {
+	b   *unicornBackend
+	ptr unsafe.Pointer
+}
+
+func (c *ucContext) Free() error {
+	if c.ptr != nil {
+		C.ucs_context_free(c.b.e, c.ptr)
+		c.ptr = nil
+	}
+	return nil
+}
+
+func (b *unicornBackend) SaveContext() (CPUContext, error) {
+	var cerr C.uc_err
+	p := C.ucs_context_alloc(b.e, &cerr)
+	if p == nil || cerr != C.UC_ERR_OK {
+		return nil, ucErr("context_alloc", cerr)
+	}
+	if e := C.ucs_context_save(b.e, p); e != C.UC_ERR_OK {
+		C.ucs_context_free(b.e, p)
+		return nil, ucErr("context_save", e)
+	}
+	return &ucContext{b: b, ptr: p}, nil
+}
+
+func (b *unicornBackend) RestoreContext(ctx CPUContext) error {
+	c, ok := ctx.(*ucContext)
+	if !ok || c.ptr == nil {
+		return fmt.Errorf("emu: invalid CPU context")
+	}
+	if e := C.ucs_context_restore(b.e, c.ptr); e != C.UC_ERR_OK {
+		return ucErr("context_restore", e)
 	}
 	return nil
 }

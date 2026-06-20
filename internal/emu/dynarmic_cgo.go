@@ -183,8 +183,47 @@ func (b *dynarmicBackend) Start(begin, until uint64) error {
 	return dynErr("emu_start", C.dyn_emu_start(b.e, C.uint64_t(begin), C.uint64_t(until)))
 }
 
+// StartCount: dynarmic's run has its own tick budget and no public instruction
+// limit, so the count is advisory — run normally (the scheduler also preempts
+// via the interrupt budget, which works on both engines).
+func (b *dynarmicBackend) StartCount(begin, until, count uint64) error {
+	return b.Start(begin, until)
+}
+
 func (b *dynarmicBackend) Stop() error {
 	return dynErr("emu_stop", C.dyn_emu_stop(b.e))
+}
+
+// SaveContext/RestoreContext: full register snapshot (incl. vectors) is wired
+// through the C++ shim (dyn_context_*). See dyn_shim.cpp.
+func (b *dynarmicBackend) SaveContext() (CPUContext, error) {
+	p := C.dyn_context_alloc()
+	if p == nil {
+		return nil, dynErr("context_alloc", C.DYN_ERR_NOMEM)
+	}
+	if e := C.dyn_context_save(b.e, p); e != C.DYN_OK {
+		C.dyn_context_free(p)
+		return nil, dynErr("context_save", e)
+	}
+	return &dynContext{p: p}, nil
+}
+
+func (b *dynarmicBackend) RestoreContext(ctx CPUContext) error {
+	c, ok := ctx.(*dynContext)
+	if !ok || c.p == nil {
+		return dynErr("context_restore", C.DYN_ERR)
+	}
+	return dynErr("context_restore", C.dyn_context_restore(b.e, c.p))
+}
+
+type dynContext struct{ p unsafe.Pointer }
+
+func (c *dynContext) Free() error {
+	if c.p != nil {
+		C.dyn_context_free(c.p)
+		c.p = nil
+	}
+	return nil
 }
 
 func (b *dynarmicBackend) FlushCache() error {

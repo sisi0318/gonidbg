@@ -26,6 +26,11 @@ type methodRef struct {
 	m   *dvm.Method
 }
 
+type fieldRef struct {
+	cls *dvm.Class
+	f   *dvm.Field
+}
+
 // decodeVaList extracts n general-purpose (int/long/pointer) varargs from an
 // AAPCS64 __va_list:
 //
@@ -143,7 +148,13 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 
 	case jniFindClass:
 		name, _ := e.ReadCStr(e.jarg(b, 1))
-		ret = uint64(e.classRef(name))
+		if e.classAllowed(name) {
+			ret = uint64(e.classRef(name))
+		} else {
+			// A filtered class is "not found" — per JNI that means a pending
+			// NoClassDefFoundError. unidbg's addFilterFoundClass works this way.
+			e.pendingExc = true
+		}
 		detail = fmt.Sprintf("%q", name)
 
 	case jniGetObjectClass:
@@ -174,6 +185,16 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 
 	case 114, 115: // CallStaticObjectMethod[V](env, clazz, methodID, args/va_list)
 		ret, detail = e.callStatic(b, idx == 115)
+	case 129, 130, 131: // CallStaticIntMethod[V/A]
+		if cls, sig, va := e.callStaticInfo(b, idx == 130); cls != nil {
+			ret = uint64(uint32(e.vm.Jni().CallStaticIntMethodV(e.vm, cls, sig, va)))
+			detail = sig
+		}
+	case 141, 142, 143: // CallStaticVoidMethod[V/A]
+		if cls, sig, va := e.callStaticInfo(b, idx == 142); cls != nil {
+			e.vm.Jni().CallStaticVoidMethodV(e.vm, cls, sig, va)
+			detail = sig
+		}
 
 	case 34, 35: // CallObjectMethod[V] (instance) -> the Jni handler.CallObjectMethodV
 		if obj, sig, va := e.callInstanceInfo(b, idx == 35); obj != nil {
@@ -183,14 +204,26 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 			detail = sig
 		}
 
-	case 37, 38, 49, 50, 52, 53: // CallBoolean/Int/Long Method[V] (instance) -> CallLongMethodV
-		if obj, sig, va := e.callInstanceInfo(b, idx == 38 || idx == 50 || idx == 53); obj != nil {
+	case 37, 38: // CallBooleanMethod[V] (instance)
+		if obj, sig, va := e.callInstanceInfo(b, idx == 38); obj != nil {
+			if e.vm.Jni().CallBooleanMethodV(e.vm, obj, sig, va) {
+				ret = 1
+			}
+			detail = sig
+		}
+	case 49, 50: // CallIntMethod[V] (instance)
+		if obj, sig, va := e.callInstanceInfo(b, idx == 50); obj != nil {
+			ret = uint64(uint32(e.vm.Jni().CallIntMethodV(e.vm, obj, sig, va)))
+			detail = sig
+		}
+	case 52, 53: // CallLongMethod[V] (instance)
+		if obj, sig, va := e.callInstanceInfo(b, idx == 53); obj != nil {
 			ret = uint64(e.vm.Jni().CallLongMethodV(e.vm, obj, sig, va))
 			detail = sig
 		}
-	case 61, 62: // CallVoidMethod[V] (instance) -> CallObjectMethodV, result ignored
+	case 61, 62: // CallVoidMethod[V] (instance)
 		if obj, sig, va := e.callInstanceInfo(b, idx == 62); obj != nil {
-			e.vm.Jni().CallObjectMethodV(e.vm, obj, sig, va)
+			e.vm.Jni().CallVoidMethodV(e.vm, obj, sig, va)
 			detail = sig
 		}
 
@@ -200,8 +233,48 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 		ret = 1
 
 	case jniGetFieldID, jniGetStaticFieldID:
-		// return a non-zero opaque field id (name+sig interned lazily later)
-		ret = 0x6600_0001
+		// Intern a real field id keyed to (class, name, sig) so the field
+		// getters/setters below can rebuild the "Class->name:Sig" lookup string.
+		cls := e.derefClass(e.jarg(b, 1))
+		name, _ := e.ReadCStr(e.jarg(b, 2))
+		sig, _ := e.ReadCStr(e.jarg(b, 3))
+		if cls != nil {
+			f := cls.FieldID(e.vm, name, sig, idx == jniGetStaticFieldID)
+			e.fields[f.ID] = &fieldRef{cls: cls, f: f}
+			ret = uint64(f.ID)
+			detail = fmt.Sprintf("%s.%s:%s", cls.Name, name, sig)
+		}
+
+	case 95: // GetObjectField(obj, fieldID) -> Jni.GetObjectField
+		if obj, sig := e.fieldInfo(b); obj != nil {
+			if o := e.vm.Jni().GetObjectField(e.vm, obj, sig); o != nil {
+				ret = uint64(e.vm.Box(o))
+			}
+			detail = sig
+		}
+	case 100: // GetIntField
+		if obj, sig := e.fieldInfo(b); obj != nil {
+			ret = uint64(uint32(e.vm.Jni().GetIntField(e.vm, obj, sig)))
+			detail = sig
+		}
+	case 104: // SetObjectField(obj, fieldID, val)
+		if obj, sig := e.fieldInfo(b); obj != nil {
+			val := e.vm.Deref(dvm.Ref(int32(e.jarg(b, 3))))
+			e.vm.Jni().SetObjectField(e.vm, obj, sig, val)
+			detail = sig
+		}
+	case 145: // GetStaticObjectField(cls, fieldID)
+		if cls, sig := e.staticFieldInfo(b); sig != "" {
+			if o := e.vm.Jni().GetStaticObjectField(e.vm, cls, sig); o != nil {
+				ret = uint64(e.vm.Box(o))
+			}
+			detail = sig
+		}
+	case 150: // GetStaticIntField
+		if cls, sig := e.staticFieldInfo(b); sig != "" {
+			ret = uint64(uint32(e.vm.Jni().GetStaticIntField(e.vm, cls, sig)))
+			detail = sig
+		}
 
 	case jniRegisterNatives:
 		// (clazz, JNINativeMethod* methods, jint count). Record name+sig->fnPtr
@@ -220,6 +293,12 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 			fnPtr := le64(ent[16:])
 			name, _ := e.ReadCStr(namePtr)
 			sig, _ := e.ReadCStr(sigPtr)
+			if cls != nil && !e.vm.Jni().AcceptMethod(e.vm, cls, clsName+"->"+name+sig, false) {
+				if e.cfg.Verbose {
+					fmt.Printf("[JNI]   reject %s->%s%s\n", clsName, name, sig)
+				}
+				continue
+			}
 			key := clsName + "." + name + sig
 			e.natives[key] = fnPtr
 			if e.cfg.Verbose {
@@ -344,9 +423,24 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 	case jniDeleteGlobalRef, jniDeleteLocalRef:
 		ret = 0
 
-	case 28, 29, 30: // NewObject[V/A](clazz, methodID, ...) -> fresh boxed object
+	case 28, 29, 30: // NewObject[V/A](clazz, methodID, ...) -> Jni.NewObjectV, else fresh boxed object
 		if cls := e.derefClass(e.jarg(b, 1)); cls != nil {
-			ret = uint64(e.vm.NewObject(cls, nil))
+			sig := cls.Name + "-><init>"
+			args := make([]uint64, 8)
+			if mr := e.methods[dvm.Ref(int32(e.jarg(b, 2)))]; mr != nil {
+				sig = cls.Name + "->" + mr.m.Name + mr.m.Sig
+				if idx == 29 { // NewObjectV: va_list at arg3
+					args = e.decodeVaList(e.jarg(b, 3), 8)
+				} else {
+					args = []uint64{e.jarg(b, 3), e.jarg(b, 4), e.jarg(b, 5), e.jarg(b, 6), e.jarg(b, 7)}
+				}
+			}
+			if o := e.vm.Jni().NewObjectV(e.vm, cls, sig, dvm.NewVaList(e.vm, args)); o != nil {
+				ret = uint64(e.vm.Box(o))
+			} else {
+				ret = uint64(e.vm.NewObject(cls, nil))
+			}
+			detail = sig
 		}
 
 	case 217, 218: // MonitorEnter / MonitorExit
@@ -400,24 +494,61 @@ func (e *Emulator) handleJNI(idx int, b emu.Backend) {
 // handler (your dvm.Jni), then boxing the returned object as a guest handle.
 // Returns the result handle and a trace detail string.
 func (e *Emulator) callStatic(b emu.Backend, isV bool) (uint64, string) {
-	mid := dvm.Ref(int32(e.jarg(b, 2)))
-	mr := e.methods[mid]
-	if mr == nil {
+	cls, sig, va := e.callStaticInfo(b, isV)
+	if cls == nil {
 		return 0, "<unknown methodID>"
+	}
+	obj := e.vm.Jni().CallStaticObjectMethodV(e.vm, cls, sig, va)
+	if obj == nil {
+		return 0, sig
+	}
+	return uint64(e.vm.Box(obj)), sig
+}
+
+// callStaticInfo decodes a static Call<Type>Method[V]: returns the class, the
+// "Class->name+sig" key, and the decoded args.
+func (e *Emulator) callStaticInfo(b emu.Backend, isV bool) (*dvm.Class, string, *dvm.VaList) {
+	mr := e.methods[dvm.Ref(int32(e.jarg(b, 2)))]
+	if mr == nil {
+		return nil, "", nil
 	}
 	var args []uint64
 	if isV {
-		args = e.decodeVaList(e.jarg(b, 3), 8) // AAPCS64 __va_list
+		args = e.decodeVaList(e.jarg(b, 3), 8)
 	} else {
 		args = []uint64{e.jarg(b, 3), e.jarg(b, 4), e.jarg(b, 5), e.jarg(b, 6), e.jarg(b, 7)}
 	}
-	sig := mr.cls.Name + "->" + mr.m.Name + mr.m.Sig
-	obj := e.vm.Jni().CallStaticObjectMethodV(e.vm, mr.cls, sig, dvm.NewVaList(e.vm, args))
-	detail := fmt.Sprintf("%s a0=0x%x a1=0x%x", sig, args[0], args[1])
-	if obj == nil {
-		return 0, detail
+	return mr.cls, mr.cls.Name + "->" + mr.m.Name + mr.m.Sig, dvm.NewVaList(e.vm, args)
+}
+
+// fieldInfo decodes an instance field access (obj at arg1, fieldID at arg2)
+// into the target object and its "Class->name:Sig" lookup string.
+func (e *Emulator) fieldInfo(b emu.Backend) (*dvm.Object, string) {
+	obj := e.vm.Deref(dvm.Ref(int32(e.jarg(b, 1))))
+	fr := e.fields[dvm.Ref(int32(e.jarg(b, 2)))]
+	if obj == nil || fr == nil {
+		return nil, ""
 	}
-	return uint64(e.vm.Box(obj)), detail
+	return obj, fr.cls.Name + "->" + fr.f.Name + ":" + fr.f.Sig
+}
+
+// staticFieldInfo decodes a static field access (class at arg1, fieldID at arg2).
+func (e *Emulator) staticFieldInfo(b emu.Backend) (*dvm.Class, string) {
+	fr := e.fields[dvm.Ref(int32(e.jarg(b, 2)))]
+	if fr == nil {
+		return e.derefClass(e.jarg(b, 1)), ""
+	}
+	return fr.cls, fr.cls.Name + "->" + fr.f.Name + ":" + fr.f.Sig
+}
+
+// classAllowed reports whether FindClass should report a class as found. With
+// no filter set every class is found; with a filter (SetFoundClassFilter) only
+// the listed classes are — mirroring unidbg's addFilterFoundClass.
+func (e *Emulator) classAllowed(name string) bool {
+	if e.classFilter == nil {
+		return true
+	}
+	return e.classFilter[name]
 }
 
 func (e *Emulator) gstr(ref uint64) string {

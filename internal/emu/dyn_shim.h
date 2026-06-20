@@ -59,6 +59,14 @@ int dyn_emu_stop(dyn_engine *e);
 // dyn_flush_cache drops all compiled blocks (call after patching guest code).
 void dyn_flush_cache(dyn_engine *e);
 
+// CPU context save/restore for cooperative thread switching: snapshots the full
+// register file (X0..X30, SP, PC, PSTATE, TPIDR, V0..V31, FPCR, FPSR) into an
+// opaque blob and reloads it. alloc returns NULL on OOM.
+void *dyn_context_alloc(void);
+void  dyn_context_free(void *ctx);
+int   dyn_context_save(dyn_engine *e, void *ctx);
+int   dyn_context_restore(dyn_engine *e, void *ctx);
+
 // Hook wiring: cbid is echoed back to the Go trampolines (goDyn* in
 // dynarmic_cgo.go). intr fires on SVC; mem fires on access to an unmapped page.
 void dyn_set_intr_cb(dyn_engine *e, uint64_t cbid);

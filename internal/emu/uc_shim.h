@@ -35,6 +35,15 @@ uc_err ucs_emu_start(ucs_engine *e, uint64_t begin, uint64_t until, uint64_t tim
 uc_err ucs_emu_stop(ucs_engine *e);
 uc_err ucs_flush_tb(ucs_engine *e); // invalidate translation cache (uc_ctl TB flush)
 
+// CPU context save/restore for cooperative thread switching. The context is an
+// opaque uc_context* (returned as void*); alloc/save/restore/free all run on the
+// engine thread. ucs_context_alloc returns NULL (and *err != UC_ERR_OK) if the
+// loaded libunicorn lacks the uc_context_* API.
+void  *ucs_context_alloc(ucs_engine *e, uc_err *err);
+uc_err ucs_context_save(ucs_engine *e, void *ctx);
+uc_err ucs_context_restore(ucs_engine *e, void *ctx);
+void   ucs_context_free(ucs_engine *e, void *ctx);
+
 // Hooks. cbid is echoed back to the Go trampoline. The unicorn hook handle is
 // returned in *hookOut for later removal.
 uc_err ucs_hook_code(ucs_engine *e, uint64_t *hookOut, uint64_t begin, uint64_t end, uint64_t cbid);

@@ -50,6 +50,14 @@ type Config struct {
 	// Engine selects the CPU backend: "unicorn" | "dynarmic" | "" (auto /
 	// $GONIDBG_ENGINE / first compiled in).
 	Engine string
+	// PropertyProvider, if set, answers the loaded .so's __system_property_get(key)
+	// calls: return (value, true) to supply a value, or ("", false) for "unset".
+	PropertyProvider func(key string) (string, bool)
+	// FileResolver, if set, is consulted for guest file opens the built-in VFS
+	// can't satisfy: return (content, true, nil) to supply a file, (nil, true,
+	// err) to force an error (e.g. a missing/denied path), or (nil, false, nil)
+	// to fall through to the default "no such file". Mirrors unidbg's IOResolver.
+	FileResolver func(path string) ([]byte, bool, error)
 	// Verbose logs each syscall / JNI call / unresolved import.
 	Verbose bool
 }
@@ -102,6 +110,8 @@ type Emulator struct {
 	classMeta   *dvm.Class             // java/lang/Class
 	natives     map[string]uint64      // "class.name+sig" -> registered native fn ptr
 	methods     map[dvm.Ref]*methodRef // jmethodID -> (class, method)
+	fields      map[dvm.Ref]*fieldRef  // jfieldID -> (class, field)
+	classFilter map[string]bool        // FindClass allow-set (nil = allow all)
 	arrayPins   map[uint64]dvm.Ref     // GetByteArrayElements ptr -> array ref (copy-back)
 	pendingExc  bool                   // a pending JNI exception (Throw/ThrowNew)
 
@@ -109,6 +119,15 @@ type Emulator struct {
 	hostImpl   map[uint64]hostFn // svc addr -> host impl
 	replaced   map[uint64]hostFn // user Replace()d functions (svc addr -> Go impl)
 	atRandom   uint64            // guest ptr to 16 "random" bytes (AT_RANDOM)
+
+	// cooperative scheduler state (see scheduler.go)
+	fibers      []*fiber // pthread_create'd threads
+	curFiber    *fiber   // fiber currently in a slice (nil = main thread)
+	nextFiberID int
+	threadCap   int    // per-slice syscall budget for the running fiber (0 = main)
+	threadOps   int    // syscalls serviced in the current slice
+	yieldReason int    // why the current slice stopped (yield*)
+	yieldAddr   uint64 // futex uaddr the fiber parked on
 }
 
 // hostFn is a native function implemented on the Go side (args in X0.., ret X0).
@@ -122,6 +141,22 @@ func (e *Emulator) MainModule() *Module { return e.main }
 
 // VM returns the fake Dalvik VM (class registry + handle table).
 func (e *Emulator) VM() *dvm.VM { return e.vm }
+
+// SetFoundClassFilter restricts which classes FindClass reports as found: a
+// class not on the list resolves to NULL with a pending exception (like
+// unidbg's vm.addFilterFoundClass, which native anti-tamper checks rely on).
+// Pass the full allow-list; nil/empty clears the filter (every class found).
+func (e *Emulator) SetFoundClassFilter(names []string) {
+	if len(names) == 0 {
+		e.classFilter = nil
+		return
+	}
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	e.classFilter = m
+}
 
 // LoadDex parses a classes.dex and registers its classes/methods/fields into the
 // VM (metadata only — no bytecode execution). Returns the class count.
@@ -168,7 +203,11 @@ func New(cfg Config) (*Emulator, error) {
 		classRefs:   map[string]dvm.Ref{},
 		natives:     map[string]uint64{},
 		methods:     map[dvm.Ref]*methodRef{},
+		fields:      map[dvm.Ref]*fieldRef{},
 		arrayPins:   map[uint64]dvm.Ref{},
+	}
+	if cfg.FileResolver != nil {
+		e.fs.SetFallback(cfg.FileResolver)
 	}
 	e.classMeta = e.vm.ResolveClass("java/lang/Class")
 	if cfg.JNI != nil {
@@ -406,6 +445,11 @@ func (e *Emulator) onInterrupt(b emu.Backend, intno uint32) {
 		_ = b.RegWrite(emu.RegX0, 0) // optimistic default
 		return
 	}
+	// Scheduler hooks (futex / nanosleep) drive cooperative switching — futex
+	// WAKE wakes parked fibers regardless of caller; WAIT/sleep yield a fiber.
+	if num, _ := b.RegRead(emu.RegX8); e.handleSchedSyscall(b, num) {
+		return
+	}
 	e.scCount++
 	if e.scCount > 200000 {
 		fmt.Println("[guard] runaway syscalls — stopping emulation")
@@ -413,6 +457,15 @@ func (e *Emulator) onInterrupt(b emu.Backend, intno uint32) {
 		return
 	}
 	e.kctx.Dispatch()
+	// Preempt the running fiber after a serviced syscall (a clean instruction
+	// boundary, so its full context snapshots correctly) when its slice is spent.
+	if e.threadCap > 0 {
+		e.threadOps++
+		if e.threadOps > e.threadCap {
+			e.yieldReason = yieldPreempt
+			_ = b.Stop()
+		}
+	}
 }
 
 // CallFunc invokes guest code at addr with up to 8 integer args (X0..X7),
@@ -458,6 +511,8 @@ func (e *Emulator) CallOffset(m *Module, offset uint64, args ...uint64) (uint64,
 	}
 	return e.CallFunc(m.Base+offset, args...)
 }
+
+// RunThreads (the cooperative scheduler) and PendingThreads live in scheduler.go.
 
 // NearestSym maps a guest address to "module!symbol+0xNN" for diagnostics.
 func (e *Emulator) NearestSym(addr uint64) string {

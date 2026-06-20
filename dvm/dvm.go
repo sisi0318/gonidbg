@@ -48,14 +48,41 @@ type Field struct {
 	Static    bool
 }
 
-// Jni is the host callback surface, mirroring unidbg's AbstractJni. the host app
-// overrides a handful of these; everything else falls through to defaults.
+// Jni is the host callback surface, mirroring unidbg's AbstractJni. The host app
+// overrides a handful of these; everything else falls through to defaults
+// (embed AbstractJni so you only implement what your .so actually calls).
+//
+// The "...V" suffix is unidbg's: it is the variadic dispatch path (Call*MethodV
+// with a decoded VaList), which is what the JNIEnv trampoline routes to.
 type Jni interface {
-	CallStaticObjectMethodV(vm *VM, cls *Class, sig string, args *VaList) *Object
+	// AcceptMethod decides whether a RegisterNatives entry is accepted. Return
+	// false to make the emulator treat that native method as unresolved (it then
+	// can't be invoked) — used to force specific methods to fall through. Default
+	// (AbstractJni) returns true.
+	AcceptMethod(vm *VM, cls *Class, sig string, static bool) bool
+
+	// Call<Type>MethodV — instance method dispatch.
 	CallObjectMethodV(vm *VM, obj *Object, sig string, args *VaList) *Object
+	CallBooleanMethodV(vm *VM, obj *Object, sig string, args *VaList) bool
+	CallIntMethodV(vm *VM, obj *Object, sig string, args *VaList) int32
 	CallLongMethodV(vm *VM, obj *Object, sig string, args *VaList) int64
+	CallVoidMethodV(vm *VM, obj *Object, sig string, args *VaList)
+
+	// CallStatic<Type>MethodV — static method dispatch.
+	CallStaticObjectMethodV(vm *VM, cls *Class, sig string, args *VaList) *Object
+	CallStaticIntMethodV(vm *VM, cls *Class, sig string, args *VaList) int32
+	CallStaticVoidMethodV(vm *VM, cls *Class, sig string, args *VaList)
+
+	// Field access.
+	GetObjectField(vm *VM, obj *Object, sig string) *Object
+	GetIntField(vm *VM, obj *Object, sig string) int32
+	SetObjectField(vm *VM, obj *Object, sig string, val *Object)
 	GetStaticObjectField(vm *VM, cls *Class, sig string) *Object
-	// ... extend with the other Call*/Get* forms as the .so exercises them.
+	GetStaticIntField(vm *VM, cls *Class, sig string) int32
+
+	// NewObjectV constructs an instance (jobject) — return a boxed Object to
+	// override the default (an empty instance of cls).
+	NewObjectV(vm *VM, cls *Class, sig string, args *VaList) *Object
 }
 
 // VM is the JavaVM: class registry + handle table.

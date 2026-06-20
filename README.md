@@ -183,7 +183,7 @@ gonidbg/
 - JNI / syscall 仍是子集:覆盖常见用法,但不是全部 ~232 个 JNI 槽位 / 完整 syscall 表。
 - DEX 是**元数据级**:解析类/方法/字段(签名、父类)供 FindClass/GetMethodID/GetFieldID 解析,但**不执行 DEX 字节码**(无 JVM);Java 侧行为仍由你用 `dvm.Jni` 建模。
 - 内联 hook 与控制台调试器需 Unicorn 引擎(dynarmic 是块 JIT,无逐指令 hook)。
-- 真正的线程(`pthread_create` 为 no-op)、信号、iOS / Mach-O。
+- 真并发线程(已有单核协作式调度器:`pthread_create` 建 fiber、按时间片切换、在 futex/sleep 处保存并恢复 CPU 上下文 —— 但非真并发)、信号、iOS / Mach-O。
 
 ## 从源码构建 / 引擎
 
