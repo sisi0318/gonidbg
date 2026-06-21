@@ -23,8 +23,14 @@ examples/douyin/*.so
 *.apk
 examples/unidbg-qsign-master/*
 examples/qsign/**
+examples/douyin1/**
+examples/dy-server/**
 
 config.json
 
-**.txt
+*.txt
+*.bin
+*.log
+
 /traces/**
+

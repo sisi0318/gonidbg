@@ -19,12 +19,37 @@
 # Env:    DYN_SRC (clone dir), DYN_VENDOR (output), BOOST_VER, JOBS
 set -euo pipefail
 
-DYN_SRC="${DYN_SRC:-/c/dynsrc}"
-DYN_VENDOR="${DYN_VENDOR:-/c/dynvendor}"
+# Vendor dirs: Windows git-bash uses C:/ (ASCII path — cgo rejects this repo's
+# non-ASCII path); Linux/macOS use $HOME. Override with DYN_SRC / DYN_VENDOR.
+if command -v cygpath >/dev/null 2>&1; then
+  DYN_SRC="${DYN_SRC:-/c/dynsrc}"; DYN_VENDOR="${DYN_VENDOR:-/c/dynvendor}"
+else
+  DYN_SRC="${DYN_SRC:-$HOME/dynsrc}"; DYN_VENDOR="${DYN_VENDOR:-$HOME/dynvendor}"
+fi
 BOOST_VER="${BOOST_VER:-1.84.0}"
 BOOST_US="${BOOST_VER//./_}"           # 1.84.0 -> 1_84_0
 JOBS="${JOBS:-4}"                      # keep modest: parallel `zig cc` can race on Windows
 DYN_REPO="${DYN_REPO:-https://github.com/lioncash/dynarmic.git}"
+
+# Cross-compile knobs (all unset => native host build, byte-for-byte as before).
+# Set ZIG_TARGET to a zig triple (e.g. x86_64-linux-gnu) to build the static libs
+# for another OS/arch: the cc/c++ wrappers get "-target <triple>", and CMake is put
+# in cross mode (CMAKE_SYSTEM_NAME/PROCESSOR) so it picks the matching dynarmic
+# backend and skips host try-run checks. Pick a separate DYN_VENDOR per target.
+ZIG_TARGET="${ZIG_TARGET:-}"
+CROSS_SYSTEM_NAME="${CROSS_SYSTEM_NAME:-Linux}"
+CROSS_SYSTEM_PROCESSOR="${CROSS_SYSTEM_PROCESSOR:-x86_64}"
+TFLAG=""; [ -n "$ZIG_TARGET" ] && TFLAG="-target $ZIG_TARGET"
+# Portable CPU baseline (native builds only; a cross -target already defaults to a
+# generic baseline). zig defaults to -mcpu=native, which bakes the BUILD host's
+# AVX2/BMI2/... into libdynarmic.a — the Go binary then dies with "Illegal
+# instruction (core dumped)" when run on a machine with an older/limited CPU.
+# Pin a generic baseline so the lib is portable. Override: MCPU=x86_64_v2 (faster).
+MCPU="${MCPU:-baseline}"
+CFLAG=""; [ -z "$ZIG_TARGET" ] && CFLAG="-mcpu=$MCPU"
+# separate build dir per target so a cross configure never clashes with the host
+# CMakeCache (CMAKE_SYSTEM_NAME can't change in place); unset => "$DYN_SRC/build".
+BUILD_DIR="$DYN_SRC/build${ZIG_TARGET:+-$ZIG_TARGET}"
 
 command -v zig >/dev/null || { echo "need 'zig' in PATH"; exit 1; }
 command -v git >/dev/null || { echo "need 'git' in PATH"; exit 1; }
@@ -84,16 +109,17 @@ fi
 #    doesn't dispatch on argv[0], so wrap "zig cc/c++/ar/ranlib").
 ZIGW_DIR="$DYN_SRC/zigwrap"; mkdir -p "$ZIGW_DIR"
 ZIGEXE=$(cygpath -w "$(command -v zig)" 2>/dev/null || command -v zig)
-mkcmd() { printf '@echo off\r\n"%s" %s %%*\r\n' "$ZIGEXE" "$1" > "$ZIGW_DIR/zig-$2.cmd"; }
+# cc/c++/asm carry the cross "-target" (if any); ar/ranlib are format-agnostic.
+mkcmd() { printf '@echo off\r\n"%s" %s %s %%*\r\n' "$ZIGEXE" "$1" "$2" > "$ZIGW_DIR/zig-$3.cmd"; }
 if command -v cygpath >/dev/null; then            # Windows: .cmd wrappers
-  mkcmd cc cc; mkcmd c++ cxx; mkcmd ar ar; mkcmd ranlib ranlib
+  mkcmd cc "$TFLAG $CFLAG" cc; mkcmd c++ "$TFLAG $CFLAG" cxx; mkcmd ar "" ar; mkcmd ranlib "" ranlib
   CC_W="$ZIGW_DIR/zig-cc.cmd"; CXX_W="$ZIGW_DIR/zig-cxx.cmd"
   AR_W="$ZIGW_DIR/zig-ar.cmd"; RANLIB_W="$ZIGW_DIR/zig-ranlib.cmd"
 else                                              # POSIX: .sh wrappers
-  for t in cc:cc c++:cxx ar:ar ranlib:ranlib; do
-    sub=${t%%:*}; name=${t##*:}
-    printf '#!/usr/bin/env bash\nexec zig %s "$@"\n' "$sub" > "$ZIGW_DIR/zig-$name"; chmod +x "$ZIGW_DIR/zig-$name"
-  done
+  printf '#!/usr/bin/env bash\nexec zig cc %s %s "$@"\n'  "$TFLAG" "$CFLAG" > "$ZIGW_DIR/zig-cc";     chmod +x "$ZIGW_DIR/zig-cc"
+  printf '#!/usr/bin/env bash\nexec zig c++ %s %s "$@"\n' "$TFLAG" "$CFLAG" > "$ZIGW_DIR/zig-cxx";    chmod +x "$ZIGW_DIR/zig-cxx"
+  printf '#!/usr/bin/env bash\nexec zig ar "$@"\n'              > "$ZIGW_DIR/zig-ar";     chmod +x "$ZIGW_DIR/zig-ar"
+  printf '#!/usr/bin/env bash\nexec zig ranlib "$@"\n'         > "$ZIGW_DIR/zig-ranlib"; chmod +x "$ZIGW_DIR/zig-ranlib"
   CC_W="$ZIGW_DIR/zig-cc"; CXX_W="$ZIGW_DIR/zig-cxx"; AR_W="$ZIGW_DIR/zig-ar"; RANLIB_W="$ZIGW_DIR/zig-ranlib"
 fi
 
@@ -107,29 +133,43 @@ set(CMAKE_ASM_COMPILER "$CC_W")
 set(CMAKE_AR     "$AR_W"     CACHE FILEPATH "Archiver" FORCE)
 set(CMAKE_RANLIB "$RANLIB_W" CACHE FILEPATH "Ranlib"   FORCE)
 EOF
+if [ -n "$ZIG_TARGET" ]; then                     # cross: put CMake in cross mode
+  cat >> "$DYN_SRC/zig-toolchain.cmake" <<EOF
+set(CMAKE_SYSTEM_NAME $CROSS_SYSTEM_NAME)
+set(CMAKE_SYSTEM_PROCESSOR $CROSS_SYSTEM_PROCESSOR)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+EOF
+  echo "[cross] ZIG_TARGET=$ZIG_TARGET  system=$CROSS_SYSTEM_NAME/$CROSS_SYSTEM_PROCESSOR"
+fi
 export ZIG_GLOBAL_CACHE_DIR="$DYN_SRC/.zigcache"
-echo "[cmake] configure"
-"$CMAKE" -G Ninja -S "$DYN_SRC" -B "$DYN_SRC/build" \
+echo "[cmake] configure -> $BUILD_DIR"
+"$CMAKE" -G Ninja -S "$DYN_SRC" -B "$BUILD_DIR" \
   -DCMAKE_TOOLCHAIN_FILE="$DYN_SRC/zig-toolchain.cmake" \
   -DCMAKE_MAKE_PROGRAM="$NINJA" \
   -DCMAKE_BUILD_TYPE=Release -DDYNARMIC_TESTS=OFF -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_POLICY_DEFAULT_CMP0167=OLD -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DBoost_INCLUDE_DIR="$BOOST_INC"
 echo "[ninja] build dynarmic (-j$JOBS)"
-"$NINJA" -C "$DYN_SRC/build" dynarmic -j "$JOBS"
+"$NINJA" -C "$BUILD_DIR" dynarmic -j "$JOBS"
 
 # 7) collect libs + headers into the ASCII vendor dir
 echo "[vendor] -> $DYN_VENDOR"
 rm -rf "$DYN_VENDOR"; mkdir -p "$DYN_VENDOR/lib" "$DYN_VENDOR/include"
-find "$DYN_SRC/build" -name '*.a' -exec cp {} "$DYN_VENDOR/lib/" \;
+find "$BUILD_DIR" -name '*.a' -exec cp {} "$DYN_VENDOR/lib/" \;
 cp -r "$DYN_SRC/src/dynarmic" "$DYN_VENDOR/include/"   # dynarmic/interface/* headers
 
 echo ""
 echo "[ok] dynarmic vendored. libs:"
 ls -1 "$DYN_VENDOR/lib"
 echo ""
-echo "Build the dynarmic-engine server with:"
-echo "  export CC=\"zig cc\" CXX=\"zig c++\" CGO_ENABLED=1"
-echo "  export CGO_CXXFLAGS=\"-I$DYN_VENDOR/include -std=c++20\""
+echo "Now build the dynarmic-engine binaries (libs match this build's MCPU=$MCPU):"
+echo "  DYN_SRC=$DYN_SRC DYN_VENDOR=$DYN_VENDOR MCPU=$MCPU WITH_DYNARMIC=1 WITH_SERVER=1 ./build.sh"
+echo "  -> ./bin/douyin  (dy-server)  and  ./bin/gonidbg  (CLI)"
+echo ""
+echo "Or build the server directly:"
+echo "  export CC=\"zig cc\" CXX=\"zig c++\" CGO_ENABLED=1 CGO_CFLAGS_ALLOW=.*"
+echo "  export CGO_CXXFLAGS=\"-I$DYN_VENDOR/include -std=c++20 -mcpu=$MCPU\""
 echo "  export CGO_LDFLAGS=\"-L$DYN_VENDOR/lib -ldynarmic -lmcl -lfmt -lZydis -lZycore -lc++\""
-echo "  go build -tags dynarmic ./cmd/signserver"
+echo "  go build -tags dynarmic -o douyin ./examples/dy-server"

@@ -97,6 +97,10 @@ type Context struct {
 	VFS     *vfs.VFS
 	Pid     int
 	Verbose bool
+	// Epoch, if non-zero, pins gettimeofday/clock_gettime to this fixed Unix time
+	// (seconds) instead of the host clock — for deterministic, reproducible runs
+	// (reverse-engineering: the same inputs must yield the same signature).
+	Epoch int64
 
 	brkCur   uint64 // current program break (0 = uninitialized)
 	Exited   bool   // guest called exit/exit_group
@@ -529,8 +533,16 @@ func sysBrk(c *Context, a [6]uint64) int64 {
 	return int64(want)
 }
 
+// nowTime returns the host clock, or the pinned Epoch if one was set.
+func (c *Context) nowTime() time.Time {
+	if c.Epoch != 0 {
+		return time.Unix(c.Epoch, 0)
+	}
+	return time.Now()
+}
+
 func sysClockGettime(c *Context, a [6]uint64) int64 {
-	now := time.Now()
+	now := c.nowTime()
 	var b [16]byte
 	binary.LittleEndian.PutUint64(b[0:], uint64(now.Unix()))
 	binary.LittleEndian.PutUint64(b[8:], uint64(now.Nanosecond()))
@@ -539,7 +551,7 @@ func sysClockGettime(c *Context, a [6]uint64) int64 {
 }
 
 func sysGettimeofday(c *Context, a [6]uint64) int64 {
-	now := time.Now()
+	now := c.nowTime()
 	var b [16]byte
 	binary.LittleEndian.PutUint64(b[0:], uint64(now.Unix()))
 	binary.LittleEndian.PutUint64(b[8:], uint64(now.Nanosecond()/1000)) // usec

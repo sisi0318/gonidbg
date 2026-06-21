@@ -60,6 +60,10 @@ type Config struct {
 	FileResolver func(path string) ([]byte, bool, error)
 	// Verbose logs each syscall / JNI call / unresolved import.
 	Verbose bool
+	// Epoch, if non-zero, pins the guest clock (gettimeofday/clock_gettime) to this
+	// fixed Unix time (seconds) instead of the host clock — for deterministic,
+	// reproducible runs (e.g. reverse-engineering a time-dependent signature).
+	Epoch int64
 }
 
 const defaultPid = 28859
@@ -225,7 +229,7 @@ func New(cfg Config) (*Emulator, error) {
 		}
 	}
 	registerHostFns(e) // libc functions we implement in Go (need no libc init)
-	e.kctx = &kernel.Context{B: be, Mem: e.mem, VFS: e.fs, Pid: pid, Verbose: cfg.Verbose}
+	e.kctx = &kernel.Context{B: be, Mem: e.mem, VFS: e.fs, Pid: pid, Verbose: cfg.Verbose, Epoch: cfg.Epoch}
 
 	// Reserve fixed regions.
 	if err := be.MemMap(stubBase, stubSize, emu.ProtAll); err != nil {

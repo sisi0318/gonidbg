@@ -112,6 +112,19 @@ func (h *Hook) Arg(i int) uint64 {
 	return v
 }
 
+// Reg returns register Xi for any i in 0..30 (also 31=SP, 32=PC, 33=NZCV) via the
+// full GP register file. Use this instead of Arg for X8..X30 (Arg only covers X0..X7).
+func (h *Hook) Reg(i int) uint64 {
+	if i < 0 || i > 33 {
+		return 0
+	}
+	regs, err := h.e.be.ReadGPRegs()
+	if err != nil {
+		return 0
+	}
+	return regs[i]
+}
+
 // SetArg sets register Xi (0..7) — e.g. to rewrite an argument from an inline hook.
 func (h *Hook) SetArg(i int, v uint64) {
 	if i >= 0 && i <= 7 {
@@ -184,6 +197,21 @@ func (e *Emulator) HookSymbol(name string, fn func(h *Hook)) (func(), error) {
 		return nil, fmt.Errorf("symbol %q not found", name)
 	}
 	return e.HookAddr(addr, fn)
+}
+
+// HookRange installs a per-instruction hook over [start,end); fn gets the Hook
+// and the current PC. Like HookAddr but for a whole region (Unicorn only).
+func (e *Emulator) HookRange(start, end uint64, fn func(h *Hook, addr uint64)) (func(), error) {
+	if e.engine != "unicorn" {
+		return nil, fmt.Errorf("HookRange requires the unicorn engine (current %q)", e.engine)
+	}
+	h, err := e.be.HookCode(start, end, func(b emu.Backend, a uint64, size uint32) {
+		fn(&Hook{e}, a)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = h.Remove() }, nil
 }
 
 // ---- tracing ---------------------------------------------------------------

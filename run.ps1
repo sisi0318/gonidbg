@@ -24,6 +24,12 @@ $env:CC = "zig cc"
 $env:CXX = "zig c++"
 $env:CGO_ENABLED = "1"
 $env:CGO_CFLAGS_ALLOW = ".*"
+# Portable CPU baseline. zig defaults to -mcpu=native, which bakes the BUILD
+# machine's AVX2/BMI2/... into the cgo + dynarmic code; the binary then dies with
+# "Illegal instruction (core dumped)" when copied to a machine with an older or
+# more limited CPU. Pin a generic x86-64 baseline so it runs anywhere. Override
+# with $env:GONIDBG_MCPU=x86_64_v2 (a bit faster, still very portable).
+$mcpu = if ($env:GONIDBG_MCPU) { "-mcpu=$($env:GONIDBG_MCPU)" } else { "-mcpu=baseline" }
 # clear engine-specific vars so a previous run doesn't leak in
 $env:CGO_CFLAGS = ""; $env:CGO_CXXFLAGS = ""; $env:CGO_LDFLAGS = ""
 
@@ -33,12 +39,13 @@ if ($Engine -eq "dynarmic") {
     if (-not (Test-Path "$dynVendor/lib/libdynarmic.a")) {
         throw "dynarmic libs not found in $dynVendor/lib — run ./build-dynarmic.sh first (or set `$env:DYN_VENDOR)."
     }
-    $env:CGO_CXXFLAGS = "-I$dynSrc/src -std=c++20"
+    $env:CGO_CFLAGS   = "$mcpu"
+    $env:CGO_CXXFLAGS = "-I$dynSrc/src -std=c++20 $mcpu"
     $env:CGO_LDFLAGS  = "-L$dynVendor/lib -ldynarmic -lmcl -lfmt -lZydis -lZycore -lc++"
 }
 else {
     $uc = if ($env:UC_VENDOR) { $env:UC_VENDOR } else { "C:/ucvendor" }
-    $env:CGO_CFLAGS = "-I$uc/include -fno-sanitize=undefined -fno-stack-protector"
+    $env:CGO_CFLAGS = "-I$uc/include -fno-sanitize=undefined -fno-stack-protector $mcpu"
     $env:GONIDBG_UNICORN = "$uc/unicorn.dll"
 }
 
