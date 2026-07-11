@@ -110,14 +110,19 @@ fi
 ZIGW_DIR="$DYN_SRC/zigwrap"; mkdir -p "$ZIGW_DIR"
 ZIGEXE=$(cygpath -w "$(command -v zig)" 2>/dev/null || command -v zig)
 # cc/c++/asm carry the cross "-target" (if any); ar/ranlib are format-agnostic.
-mkcmd() { printf '@echo off\r\n"%s" %s %s %%*\r\n' "$ZIGEXE" "$1" "$2" > "$ZIGW_DIR/zig-$3.cmd"; }
+# cc/c++ wrappers append -Wno-error: dynarmic builds with -Werror, but a zig newer
+# than dynarmic was tested against (e.g. zig 0.16 = clang 21) emits new deprecation
+# warnings (fmt's `operator"" _a`, etc.) that would fail the build. -Wno-error keeps
+# them warnings. The 4th arg is appended AFTER the source (so it overrides -Werror).
+mkcmd() { printf '@echo off\r\n"%s" %s %s %%* %s\r\n' "$ZIGEXE" "$1" "$2" "${4:-}" > "$ZIGW_DIR/zig-$3.cmd"; }
 if command -v cygpath >/dev/null; then            # Windows: .cmd wrappers
-  mkcmd cc "$TFLAG $CFLAG" cc; mkcmd c++ "$TFLAG $CFLAG" cxx; mkcmd ar "" ar; mkcmd ranlib "" ranlib
-  CC_W="$ZIGW_DIR/zig-cc.cmd"; CXX_W="$ZIGW_DIR/zig-cxx.cmd"
-  AR_W="$ZIGW_DIR/zig-ar.cmd"; RANLIB_W="$ZIGW_DIR/zig-ranlib.cmd"
+  mkcmd cc "$TFLAG $CFLAG" cc "-Wno-error"; mkcmd c++ "$TFLAG $CFLAG" cxx "-Wno-error"; mkcmd ar "" ar; mkcmd ranlib "" ranlib
+  # CMake (the pip cmake.exe) needs Windows-form paths, not MSYS /c/... paths.
+  CC_W=$(cygpath -m "$ZIGW_DIR/zig-cc.cmd"); CXX_W=$(cygpath -m "$ZIGW_DIR/zig-cxx.cmd")
+  AR_W=$(cygpath -m "$ZIGW_DIR/zig-ar.cmd"); RANLIB_W=$(cygpath -m "$ZIGW_DIR/zig-ranlib.cmd")
 else                                              # POSIX: .sh wrappers
-  printf '#!/usr/bin/env bash\nexec zig cc %s %s "$@"\n'  "$TFLAG" "$CFLAG" > "$ZIGW_DIR/zig-cc";     chmod +x "$ZIGW_DIR/zig-cc"
-  printf '#!/usr/bin/env bash\nexec zig c++ %s %s "$@"\n' "$TFLAG" "$CFLAG" > "$ZIGW_DIR/zig-cxx";    chmod +x "$ZIGW_DIR/zig-cxx"
+  printf '#!/usr/bin/env bash\nexec zig cc %s %s "$@" -Wno-error\n'  "$TFLAG" "$CFLAG" > "$ZIGW_DIR/zig-cc";     chmod +x "$ZIGW_DIR/zig-cc"
+  printf '#!/usr/bin/env bash\nexec zig c++ %s %s "$@" -Wno-error\n' "$TFLAG" "$CFLAG" > "$ZIGW_DIR/zig-cxx";    chmod +x "$ZIGW_DIR/zig-cxx"
   printf '#!/usr/bin/env bash\nexec zig ar "$@"\n'              > "$ZIGW_DIR/zig-ar";     chmod +x "$ZIGW_DIR/zig-ar"
   printf '#!/usr/bin/env bash\nexec zig ranlib "$@"\n'         > "$ZIGW_DIR/zig-ranlib"; chmod +x "$ZIGW_DIR/zig-ranlib"
   CC_W="$ZIGW_DIR/zig-cc"; CXX_W="$ZIGW_DIR/zig-cxx"; AR_W="$ZIGW_DIR/zig-ar"; RANLIB_W="$ZIGW_DIR/zig-ranlib"
@@ -144,10 +149,13 @@ EOF
   echo "[cross] ZIG_TARGET=$ZIG_TARGET  system=$CROSS_SYSTEM_NAME/$CROSS_SYSTEM_PROCESSOR"
 fi
 export ZIG_GLOBAL_CACHE_DIR="$DYN_SRC/.zigcache"
+# zig's cross-compiled precompiled headers (.pch) confuse ld.lld ("unknown file
+# type") — disable PCH when cross-compiling (native keeps it for speed).
+PCHFLAG=""; [ -n "$ZIG_TARGET" ] && PCHFLAG="-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON"
 echo "[cmake] configure -> $BUILD_DIR"
 "$CMAKE" -G Ninja -S "$DYN_SRC" -B "$BUILD_DIR" \
   -DCMAKE_TOOLCHAIN_FILE="$DYN_SRC/zig-toolchain.cmake" \
-  -DCMAKE_MAKE_PROGRAM="$NINJA" \
+  -DCMAKE_MAKE_PROGRAM="$NINJA" $PCHFLAG \
   -DCMAKE_BUILD_TYPE=Release -DDYNARMIC_TESTS=OFF -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_POLICY_DEFAULT_CMP0167=OLD -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DBoost_INCLUDE_DIR="$BOOST_INC"

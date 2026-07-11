@@ -142,6 +142,39 @@ func (vm *VM) Box(o *Object) Ref {
 	return r
 }
 
+// VMState snapshots the object-handle table so a reused VM hands out the same
+// jobject/jstring/... handles on every call (some native anti-tamper code is
+// sensitive to handle values). Class/method/field interning is deliberately
+// left untouched: those IDs are stable, deterministic caches and resetting the
+// counter without the caches would risk ID collisions.
+type VMState struct {
+	nextRef Ref
+	objs    map[Ref]*Object
+}
+
+// Snapshot captures the current object-handle table.
+func (vm *VM) Snapshot() VMState {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	objs := make(map[Ref]*Object, len(vm.objs))
+	for k, v := range vm.objs {
+		objs[k] = v
+	}
+	return VMState{nextRef: vm.nextRef, objs: objs}
+}
+
+// Restore rewinds the handle table to a prior Snapshot, dropping every object
+// handed out since (transient local refs from previous calls).
+func (vm *VM) Restore(st VMState) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	vm.nextRef = st.nextRef
+	vm.objs = make(map[Ref]*Object, len(st.objs))
+	for k, v := range st.objs {
+		vm.objs[k] = v
+	}
+}
+
 // Deref resolves a handle back to its object (nil for 0/unknown).
 func (vm *VM) Deref(r Ref) *Object {
 	if r == 0 {

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 
@@ -19,6 +20,7 @@ type douyinJni struct{ dvm.AbstractJni }
 func (j douyinJni) CallStaticObjectMethodV(vm *dvm.VM, cls *dvm.Class, sig string, va *dvm.VaList) *dvm.Object {
 	switch sig {
 	case "com/bytedance/mobsec/metasec/ml/MS->b(IIJLjava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;":
+		fmt.Printf("[MS.b] arg0=%#x arg1=%#x arg2=%#x str=%q\n", uint32(va.GetIntArg(0)), uint32(va.GetIntArg(1)), uint64(va.GetLongArg(2)), va.GetStringArg(3))
 		switch va.GetIntArg(0) {
 		case 0x1000000E:
 			return &dvm.Object{Class: vm.ResolveClass("java/lang/Long"), Value: int64(2)}

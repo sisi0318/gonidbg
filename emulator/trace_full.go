@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/sisi0318/gonidbg/internal/emu"
 )
@@ -28,6 +29,21 @@ var gpRegNames = [34]string{
 }
 
 const gpIdxPC = 32 // pc is carried in the line prefix, not repeated as a delta
+
+// TraceGate, when false, makes the instruction tracer skip every instruction
+// (so a caller can time-gate tracing to a window of interest, e.g. just the
+// encrypt phase). TraceMax caps the number of traced instructions (0 = no cap).
+var (
+	TraceGate bool
+	TraceMax  uint64
+	traceN    uint64
+	// Snapshot support: when SnapAt != 0, dump guest memory [SnapLo,SnapHi) to med_snap.bin the
+	// instant traceN reaches SnapAt. Lets an offline replay (med_exec) diff its memory against the
+	// real run at a precise trace point to pinpoint a silent (non-register) memory divergence.
+	SnapAt uint64
+	SnapLo uint64
+	SnapHi uint64
+)
 
 type insnTracer struct {
 	e       *Emulator
@@ -62,6 +78,27 @@ func (e *Emulator) TraceInsns(w io.Writer, start, end, base uint64) (func(), err
 
 // onInsn fires at the start of each in-range instruction.
 func (t *insnTracer) onInsn(pc uint64) {
+	if !TraceGate {
+		return
+	}
+	if TraceMax != 0 {
+		if traceN >= TraceMax {
+			return
+		}
+		traceN++
+		if SnapAt != 0 && traceN == SnapAt {
+			var b []byte
+			for a := SnapLo; a < SnapHi; a += 0x1000 {
+				pg, e := t.e.ReadBytes(a, 0x1000)
+				if e != nil {
+					pg = make([]byte, 0x1000)
+				}
+				b = append(b, pg...)
+			}
+			_ = os.WriteFile("med_snap.bin", b, 0644)
+			fmt.Printf("[SNAP] dumped [%#x,%#x) at traceN=%d\n", SnapLo, SnapHi, traceN)
+		}
+	}
 	regs, err := t.e.be.ReadGPRegs()
 	if err != nil {
 		return

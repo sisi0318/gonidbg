@@ -214,6 +214,36 @@ func (e *Emulator) HookRange(start, end uint64, fn func(h *Hook, addr uint64)) (
 	return func() { _ = h.Remove() }, nil
 }
 
+// HookMemRead fires on every valid memory READ in [start,end]; fn gets the Hook
+// (h.PC() = the reading instruction) and the read (addr,size). Unicorn only.
+func (e *Emulator) HookMemRead(start, end uint64, fn func(h *Hook, addr uint64, size int)) (func(), error) {
+	if e.engine != "unicorn" {
+		return nil, fmt.Errorf("HookMemRead requires the unicorn engine (current %q)", e.engine)
+	}
+	h, err := e.be.HookMemRead(start, end, func(b emu.Backend, addr uint64, size int) {
+		fn(&Hook{e}, addr, size)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = h.Remove() }, nil
+}
+
+// HookMemWrite fires on every valid memory WRITE in [start,end]; fn gets the Hook
+// (h.PC() = the writing instruction), the (addr,size), and the value being written. Unicorn only.
+func (e *Emulator) HookMemWrite(start, end uint64, fn func(h *Hook, addr uint64, size int, value int64)) (func(), error) {
+	if e.engine != "unicorn" {
+		return nil, fmt.Errorf("HookMemWrite requires the unicorn engine (current %q)", e.engine)
+	}
+	h, err := e.be.HookMemWrite(start, end, func(b emu.Backend, addr uint64, size int, value int64) {
+		fn(&Hook{e}, addr, size, value)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = h.Remove() }, nil
+}
+
 // ---- tracing ---------------------------------------------------------------
 
 // Trace prints every executed instruction's PC (with nearest symbol) in

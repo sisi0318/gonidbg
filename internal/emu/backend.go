@@ -85,6 +85,10 @@ type Backend interface {
 	HookCode(start, end uint64, fn CodeHookFunc) (HookHandle, error)
 	HookInterrupt(fn InterruptHookFunc) (HookHandle, error)
 	HookMemInvalid(fn func(b Backend, typ int, addr uint64, size int, value int64) bool) (HookHandle, error)
+	// HookMemRead fires on every valid memory READ in [start,end] with (addr,size).
+	HookMemRead(start, end uint64, fn func(b Backend, addr uint64, size int)) (HookHandle, error)
+	// HookMemWrite fires on every valid memory WRITE in [start,end] with (addr,size,value).
+	HookMemWrite(start, end uint64, fn func(b Backend, addr uint64, size int, value int64)) (HookHandle, error)
 
 	// Execution
 	Start(begin, until uint64) error

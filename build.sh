@@ -13,6 +13,13 @@
 # For the Douyin sign server with the dynarmic engine, on the machine you'll run on:
 #   ./build-dynarmic.sh                         # builds libdynarmic.a (for THIS cpu)
 #   WITH_DYNARMIC=1 WITH_SERVER=1 ./build.sh    # -> ./bin/douyin (+ gonidbg CLI)
+#
+# PORTABLE=1: build ONE fully-static binary (zig -> x86_64-linux-musl) that runs on
+# ANY x86-64 Linux server — no toolchain/libc/.so needed there. Build once, copy
+# everywhere. Uses the dynarmic engine (static). Build its lib for the same target
+# first, then build:
+#   ZIG_TARGET=x86_64-linux-musl DYN_VENDOR=~/dynvendor-musl ./build-dynarmic.sh
+#   PORTABLE=1 DYN_VENDOR=~/dynvendor-musl WITH_SERVER=1 ./build.sh   # -> ./bin/douyin
 set -euo pipefail
 cd "$(dirname "$0")"
 OUT="${OUT:-bin}"
@@ -38,32 +45,46 @@ else
 fi
 
 EXE=""
-case "$(uname -s)" in
-  *NT*|*MINGW*|*MSYS*)  # Windows / git-bash
-    EXE=".exe"
-    UC="C:/ucvendor"
-    if [ ! -f "$UC/unicorn.dll" ]; then
-      echo "[setup] vendoring libunicorn via pip..."
-      python -m pip install --quiet unicorn
-      pkg=$(python -c "import unicorn,os;print(os.path.dirname(unicorn.__file__))")
-      mkdir -p "$UC/include"; cp -r "$pkg/include/unicorn" "$UC/include/"; cp "$pkg/lib/unicorn.dll" "$UC/"
-    fi
-    export CC="zig cc" CXX="zig c++"
-    export CGO_CFLAGS="-I$UC/include -fno-sanitize=undefined -fno-stack-protector $MFLAG"
-    UCLIB="$UC/unicorn.dll"
-    ;;
-  *)  # Linux / macOS
-    export CC="${CC:-zig cc}" CXX="${CXX:-zig c++}"
-    pkg=$(python3 -c "import unicorn,os;print(os.path.dirname(unicorn.__file__))" 2>/dev/null || true)
-    if [ -n "$pkg" ]; then
-      export CGO_CFLAGS="-I$pkg/include -fno-sanitize=undefined $MFLAG"
-      UCLIB=$(ls "$pkg"/lib/libunicorn.so* 2>/dev/null | head -1 || true)
-    else
-      echo "[warn] python unicorn wheel not found; relying on system libunicorn headers"
-      export CGO_CFLAGS="$MFLAG"
-    fi
-    ;;
-esac
+LDARGS=()   # extra `go build` args (static link in PORTABLE mode)
+if [ "${PORTABLE:-0}" = "1" ]; then
+  # Fully static, baseline cross-build for ANY x86-64 Linux. Uses the dynarmic
+  # engine (static — unicorn would need its .so shipped). zig targets musl so the
+  # binary has zero libc/.so dependency; the cross -target already implies a
+  # generic baseline CPU, so it can't emit instructions a server lacks.
+  PTARGET="${PTARGET:-x86_64-linux-musl}"
+  WITH_DYNARMIC=1
+  export GOOS=linux GOARCH=amd64
+  export CC="zig cc -target $PTARGET" CXX="zig c++ -target $PTARGET"
+  LDARGS=(-ldflags '-linkmode external -extldflags "-static"')
+  echo "[build] PORTABLE: static cross-build -> $PTARGET (one binary, runs on any x86-64 linux)"
+else
+  case "$(uname -s)" in
+    *NT*|*MINGW*|*MSYS*)  # Windows / git-bash
+      EXE=".exe"
+      UC="C:/ucvendor"
+      if [ ! -f "$UC/unicorn.dll" ]; then
+        echo "[setup] vendoring libunicorn via pip..."
+        python -m pip install --quiet unicorn
+        pkg=$(python -c "import unicorn,os;print(os.path.dirname(unicorn.__file__))")
+        mkdir -p "$UC/include"; cp -r "$pkg/include/unicorn" "$UC/include/"; cp "$pkg/lib/unicorn.dll" "$UC/"
+      fi
+      export CC="zig cc" CXX="zig c++"
+      export CGO_CFLAGS="-I$UC/include -fno-sanitize=undefined -fno-stack-protector $MFLAG"
+      UCLIB="$UC/unicorn.dll"
+      ;;
+    *)  # Linux / macOS
+      export CC="${CC:-zig cc}" CXX="${CXX:-zig c++}"
+      pkg=$(python3 -c "import unicorn,os;print(os.path.dirname(unicorn.__file__))" 2>/dev/null || true)
+      if [ -n "$pkg" ]; then
+        export CGO_CFLAGS="-I$pkg/include -fno-sanitize=undefined $MFLAG"
+        UCLIB=$(ls "$pkg"/lib/libunicorn.so* 2>/dev/null | head -1 || true)
+      else
+        echo "[warn] python unicorn wheel not found; relying on system libunicorn headers"
+        export CGO_CFLAGS="$MFLAG"
+      fi
+      ;;
+  esac
+fi
 export CGO_CFLAGS_ALLOW='.*'
 
 # Optional second engine: WITH_DYNARMIC=1 also links the statically-built
@@ -71,6 +92,9 @@ export CGO_CFLAGS_ALLOW='.*'
 TAGS="unicorn"
 if [ "${WITH_DYNARMIC:-0}" = "1" ]; then
   TAGS="unicorn dynarmic"
+  # Portable build: dynarmic only — drop unicorn so the binary has NO libunicorn.so
+  # runtime dependency (dynarmic is statically linked = truly self-contained).
+  [ "${PORTABLE:-0}" = "1" ] && TAGS="dynarmic"
   if [ ! -f "$DYN_VENDOR/lib/libdynarmic.a" ]; then
     echo "[error] $DYN_VENDOR/lib/libdynarmic.a not found — run ./build-dynarmic.sh first"
     echo "        (set DYN_VENDOR to where it was vendored)."
@@ -84,12 +108,12 @@ if [ "${WITH_DYNARMIC:-0}" = "1" ]; then
 fi
 
 echo "[build] gonidbg$EXE  (CLI, engine, -tags \"$TAGS\")"
-CGO_ENABLED=1 go build -tags "$TAGS" -o "$OUT/gonidbg$EXE" ./cmd/gonidbg
+CGO_ENABLED=1 go build -tags "$TAGS" ${LDARGS[@]+"${LDARGS[@]}"} -o "$OUT/gonidbg$EXE" ./cmd/gonidbg
 
 # Optional: the Douyin X-* HTTP sign server (examples/dy-server -> "douyin").
 if [ "${WITH_SERVER:-0}" = "1" ]; then
   echo "[build] douyin$EXE  (dy-server HTTP sign service, -tags \"$TAGS\")"
-  CGO_ENABLED=1 go build -tags "$TAGS" -o "$OUT/douyin$EXE" ./examples/dy-server
+  CGO_ENABLED=1 go build -tags "$TAGS" ${LDARGS[@]+"${LDARGS[@]}"} -o "$OUT/douyin$EXE" ./examples/dy-server
 fi
 
 echo "[build] elfscan$EXE / loadplan$EXE  (pure-Go analysis tools)"

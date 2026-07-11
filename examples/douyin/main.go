@@ -48,6 +48,7 @@ func main() {
 		JNI:         douyinJni{},
 		Engine:      *engine,
 		Verbose:     *verbose,
+		Epoch:       1700000000, // pin guest clock -> deterministic protobuf/heap across runs (reproducible captures)
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "boot:", err)
@@ -55,29 +56,48 @@ func main() {
 	}
 	defer e.Close()
 	fmt.Printf("engine=%s  booted (bionic + .so linked, init_array + JNI_OnLoad done)\n\n", e.Engine())
+	if os.Getenv("PROBE") != "" {
+		installProbe(e, e.MainModule())
+	}
 
 	// A request to sign: full query string + a content-type "cookie" field. The
 	// library returns 0 for minimal/incomplete inputs (its own behavior).
-	url := "https://api5-core-lf.amemv.com/aweme/v2/feed/?app_name=aweme&aid=1128"
+	url := os.Getenv("SIGN_URL")
+	if url == "" {
+		url = "https://api5-core-lf.amemv.com/aweme/v2/feed/?app_name=aweme&aid=1128"
+	}
 	cookie := "content-type\r\napplication/json; charset=UTF-8\r\n"
 
 	// Optionally record a full instruction trace of the sign call (every guest
 	// instruction the .so executes, with register deltas + call/syscall symbols).
-	var stopTrace func()
-	if *traceFile != "" {
-		stop, err := startTrace(e, *traceFile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "trace:", err)
-			os.Exit(1)
-		}
-		stopTrace = stop
+	// Always install the gated instruction tracer. emulator.TraceGate stays false
+	// (so nothing is written) until installProbe's ENC-ENTRY hook flips it on at the
+	// start of the encrypt phase; TraceMax caps the captured window. This yields a
+	// trace of ONLY the encrypt (device+nonce -> a8bbb28b) for the native-trace lift.
+	tracePath := *traceFile
+	if tracePath == "" {
+		tracePath = "enc_trace.txt"
+	}
+	emulator.TraceMax = 3000000
+	if s := os.Getenv("TRACEMAX"); s != "" {
+		fmt.Sscanf(s, "%d", &emulator.TraceMax)
+	}
+	if s := os.Getenv("MEDSNAP"); s != "" {
+		fmt.Sscanf(s, "%d", &emulator.SnapAt)
+		emulator.SnapLo = 0x40100000
+		emulator.SnapHi = 0x40600000
+	}
+	stopTrace, err := startTrace(e, tracePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "trace:", err)
+		os.Exit(1)
 	}
 
 	raw, err := sign(e, url, cookie)
 	if stopTrace != nil {
 		stopTrace() // remove the hook and flush the trace before reporting
-		if fi, statErr := os.Stat(*traceFile); statErr == nil {
-			fmt.Printf("instruction trace -> %s (%d bytes)\n\n", *traceFile, fi.Size())
+		if fi, statErr := os.Stat(tracePath); statErr == nil {
+			fmt.Printf("instruction trace -> %s (%d bytes)\n\n", tracePath, fi.Size())
 		}
 	}
 	if err != nil {

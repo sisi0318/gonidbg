@@ -97,12 +97,16 @@ static void intr_tramp(uc_engine *uc, uint32_t intno, void *user){
 static bool mem_tramp(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void *user){
 	(void)uc; return goMemHook((uint64_t)(uintptr_t)user, (int)type, addr, size, value) != 0;
 }
+// valid-memory-read hook: uc_cb_hookmem_t (void return); reuses goMemHook (return ignored).
+static void mem_read_tramp(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void *user){
+	(void)uc; (void)goMemHook((uint64_t)(uintptr_t)user, (int)type, addr, size, value);
+}
 
 // ---- command model ---------------------------------------------------------
 enum {
 	OP_REGREAD=1, OP_REGWRITE, OP_MAP, OP_UNMAP, OP_PROTECT, OP_WRITE, OP_READ,
 	OP_START, OP_STOP, OP_HOOKCODE, OP_HOOKINTR, OP_HOOKMEM, OP_HOOKDEL, OP_FLUSH,
-	OP_CTXALLOC, OP_CTXSAVE, OP_CTXRESTORE, OP_CTXFREE, OP_READGP, OP_QUIT
+	OP_CTXALLOC, OP_CTXSAVE, OP_CTXRESTORE, OP_CTXFREE, OP_READGP, OP_QUIT, OP_HOOKMEMRD, OP_HOOKMEMWR
 };
 
 // GP register ids read by OP_READGP, in trace order: x0..x30, sp, pc, nzcv.
@@ -157,6 +161,8 @@ static void ucs_dispatch(ucs_engine *e, ucs_cmd *c){
 	case OP_HOOKCODE: c->ret = P_hadd(uc,&hh,UC_HOOK_CODE,(void*)code_tramp,(void*)(uintptr_t)c->cbid,c->a0,c->a1); c->rval=(uint64_t)hh; break;
 	case OP_HOOKINTR: c->ret = P_hadd(uc,&hh,UC_HOOK_INTR,(void*)intr_tramp,(void*)(uintptr_t)c->cbid,(uint64_t)1,(uint64_t)0); c->rval=(uint64_t)hh; break;
 	case OP_HOOKMEM:  c->ret = P_hadd(uc,&hh,UC_HOOK_MEM_UNMAPPED|UC_HOOK_MEM_PROT,(void*)mem_tramp,(void*)(uintptr_t)c->cbid,(uint64_t)1,(uint64_t)0); c->rval=(uint64_t)hh; break;
+	case OP_HOOKMEMRD: c->ret = P_hadd(uc,&hh,UC_HOOK_MEM_READ,(void*)mem_read_tramp,(void*)(uintptr_t)c->cbid,c->a0,c->a1); c->rval=(uint64_t)hh; break;
+	case OP_HOOKMEMWR: c->ret = P_hadd(uc,&hh,UC_HOOK_MEM_WRITE,(void*)mem_read_tramp,(void*)(uintptr_t)c->cbid,c->a0,c->a1); c->rval=(uint64_t)hh; break;
 	case OP_HOOKDEL:  c->ret = P_hdel(uc, (uc_hook)c->a0); break;
 	case OP_FLUSH:    c->ret = P_ctl ? P_ctl(uc, UC_CTL_WRITE(UC_CTL_TB_FLUSH, 0)) : UC_ERR_OK; break;
 	case OP_CTXALLOC: {
@@ -331,6 +337,14 @@ uc_err ucs_hook_intr(ucs_engine *e, uint64_t *out, uint64_t cbid){
 }
 uc_err ucs_hook_mem_invalid(ucs_engine *e, uint64_t *out, uint64_t cbid){
 	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_HOOKMEM; c.cbid=cbid;
+	ucs_run(e,&c); if (out) *out=c.rval; return c.ret;
+}
+uc_err ucs_hook_mem_read(ucs_engine *e, uint64_t *out, uint64_t b, uint64_t en, uint64_t cbid){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_HOOKMEMRD; c.a0=b; c.a1=en; c.cbid=cbid;
+	ucs_run(e,&c); if (out) *out=c.rval; return c.ret;
+}
+uc_err ucs_hook_mem_write(ucs_engine *e, uint64_t *out, uint64_t b, uint64_t en, uint64_t cbid){
+	ucs_cmd c; memset(&c,0,sizeof(c)); c.op=OP_HOOKMEMWR; c.a0=b; c.a1=en; c.cbid=cbid;
 	ucs_run(e,&c); if (out) *out=c.rval; return c.ret;
 }
 uc_err ucs_hook_del(ucs_engine *e, uint64_t hook){

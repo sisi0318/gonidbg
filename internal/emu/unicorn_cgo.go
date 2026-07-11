@@ -44,10 +44,12 @@ var (
 )
 
 type hookReg struct {
-	be   *unicornBackend
-	code CodeHookFunc
-	intr InterruptHookFunc
-	mem  func(Backend, int, uint64, int, int64) bool
+	be    *unicornBackend
+	code  CodeHookFunc
+	intr  InterruptHookFunc
+	mem   func(Backend, int, uint64, int, int64) bool
+	memrd func(Backend, uint64, int)
+	memwr func(Backend, uint64, int, int64)
 }
 
 func registerCB(h *hookReg) uint64 {
@@ -81,7 +83,18 @@ func goIntrHook(cbid C.uint64_t, intno C.uint32_t) {
 //export goMemHook
 func goMemHook(cbid C.uint64_t, typ C.int, addr C.uint64_t, size C.int, value C.int64_t) C.int {
 	e := lookupCB(uint64(cbid))
-	if e == nil || e.mem == nil {
+	if e == nil {
+		return 0
+	}
+	if e.memrd != nil { // valid-read hook (ranged); return value ignored by unicorn
+		e.memrd(e.be, uint64(addr), int(size))
+		return 0
+	}
+	if e.memwr != nil { // valid-write hook (ranged); value = bytes being written
+		e.memwr(e.be, uint64(addr), int(size), int64(value))
+		return 0
+	}
+	if e.mem == nil {
 		return 0
 	}
 	if e.mem(e.be, int(typ), uint64(addr), int(size), int64(value)) {
@@ -247,6 +260,28 @@ func (b *unicornBackend) HookMemInvalid(fn func(Backend, int, uint64, int, int64
 	if e := C.ucs_hook_mem_invalid(b.e, &hh, C.uint64_t(id)); e != C.UC_ERR_OK {
 		unregisterCB(id)
 		return nil, ucErr("hook_mem", e)
+	}
+	b.cbs = append(b.cbs, id)
+	return &ucHook{b, uint64(hh), id}, nil
+}
+
+func (b *unicornBackend) HookMemRead(start, end uint64, fn func(Backend, uint64, int)) (HookHandle, error) {
+	id := registerCB(&hookReg{be: b, memrd: fn})
+	var hh C.uint64_t
+	if e := C.ucs_hook_mem_read(b.e, &hh, C.uint64_t(start), C.uint64_t(end), C.uint64_t(id)); e != C.UC_ERR_OK {
+		unregisterCB(id)
+		return nil, ucErr("hook_mem_read", e)
+	}
+	b.cbs = append(b.cbs, id)
+	return &ucHook{b, uint64(hh), id}, nil
+}
+
+func (b *unicornBackend) HookMemWrite(start, end uint64, fn func(Backend, uint64, int, int64)) (HookHandle, error) {
+	id := registerCB(&hookReg{be: b, memwr: fn})
+	var hh C.uint64_t
+	if e := C.ucs_hook_mem_write(b.e, &hh, C.uint64_t(start), C.uint64_t(end), C.uint64_t(id)); e != C.UC_ERR_OK {
+		unregisterCB(id)
+		return nil, ucErr("hook_mem_write", e)
 	}
 	b.cbs = append(b.cbs, id)
 	return &ucHook{b, uint64(hh), id}, nil

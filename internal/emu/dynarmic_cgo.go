@@ -187,6 +187,16 @@ func (b *dynarmicBackend) HookMemInvalid(fn func(Backend, int, uint64, int, int6
 	return &dynHook{b, id}, nil
 }
 
+// HookMemRead: not supported by the dynarmic backend (use the unicorn engine for memory-read hooks).
+func (b *dynarmicBackend) HookMemRead(start, end uint64, fn func(Backend, uint64, int)) (HookHandle, error) {
+	return noopHook{}, nil
+}
+
+// HookMemWrite: not supported by the dynarmic backend (use the unicorn engine for memory-write hooks).
+func (b *dynarmicBackend) HookMemWrite(start, end uint64, fn func(Backend, uint64, int, int64)) (HookHandle, error) {
+	return noopHook{}, nil
+}
+
 func (b *dynarmicBackend) Start(begin, until uint64) error {
 	return dynErr("emu_start", C.dyn_emu_start(b.e, C.uint64_t(begin), C.uint64_t(until)))
 }

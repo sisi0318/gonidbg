@@ -127,6 +127,92 @@ func (c *Context) fdTable() map[int32]*openFile {
 	return c.files
 }
 
+// State is the mutable per-run kernel state that accumulates across guest calls:
+// the program break, the exit latch, the fd table, the writable-FS overlay, and
+// created dirs. Snapshot captures it right after boot/init; Restore rewinds it,
+// so a reused emulator starts every call from the same kernel state a freshly
+// booted process would have (part of the emulator's Snapshot/Restore).
+type State struct {
+	brkCur   uint64
+	exited   bool
+	exitCode int
+	nextFd   int32
+	files    map[int32]*openFile
+	wfiles   map[string][]byte
+	dirs     map[string]bool
+}
+
+// Snapshot deep-copies the mutable kernel state.
+func (c *Context) Snapshot() State {
+	st := State{brkCur: c.brkCur, exited: c.Exited, exitCode: c.ExitCode, nextFd: c.nextFd}
+	if c.files != nil {
+		st.files = make(map[int32]*openFile, len(c.files))
+		for k, v := range c.files {
+			f := *v // copy pos/path/writable; data is a read-only snapshot (shared)
+			st.files[k] = &f
+		}
+	}
+	if c.wfiles != nil {
+		st.wfiles = make(map[string][]byte, len(c.wfiles))
+		for k, v := range c.wfiles {
+			st.wfiles[k] = append([]byte(nil), v...)
+		}
+	}
+	if c.dirs != nil {
+		st.dirs = make(map[string]bool, len(c.dirs))
+		for k, v := range c.dirs {
+			st.dirs[k] = v
+		}
+	}
+	return st
+}
+
+// Restore rewinds the mutable kernel state to a prior Snapshot (clearing the
+// exit latch, program break, fd table, and FS overlay accumulated since).
+func (c *Context) Restore(st State) {
+	c.brkCur = st.brkCur
+	c.Exited = st.exited
+	c.ExitCode = st.exitCode
+	c.nextFd = st.nextFd
+	c.files = copyFiles(st.files)
+	c.wfiles = copyWfiles(st.wfiles)
+	c.dirs = copyDirs(st.dirs)
+}
+
+func copyFiles(in map[int32]*openFile) map[int32]*openFile {
+	if in == nil {
+		return nil
+	}
+	out := make(map[int32]*openFile, len(in))
+	for k, v := range in {
+		f := *v
+		out[k] = &f
+	}
+	return out
+}
+
+func copyWfiles(in map[string][]byte) map[string][]byte {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]byte, len(in))
+	for k, v := range in {
+		out[k] = append([]byte(nil), v...)
+	}
+	return out
+}
+
+func copyDirs(in map[string]bool) map[string]bool {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // Handler implements one syscall. args are x0..x5. Return value goes to x0
 // (negative = -errno).
 type Handler func(c *Context, args [6]uint64) int64

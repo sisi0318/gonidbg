@@ -118,6 +118,19 @@ func (s *Space) Find(addr uint64) (Region, bool) {
 
 func (s *Space) Regions() []Region { return s.regions }
 
+// MmapTop returns the allocator's monotonic high-water cursor. Paired with
+// SetLayout for state snapshots (rewind a reused emulator's address space).
+func (s *Space) MmapTop() uint64 { return s.mmapTop }
+
+// SetLayout replaces the region table and mmap cursor wholesale — used by the
+// emulator's Restore to rewind the guest address space to a prior snapshot.
+// The caller is responsible for (un)mapping the actual backend pages to match.
+func (s *Space) SetLayout(regions []Region, mmapTop uint64) {
+	s.regions = append([]Region(nil), regions...)
+	s.mmapTop = mmapTop
+	s.sortRegions()
+}
+
 func (s *Space) insert(r Region) {
 	s.regions = append(s.regions, r)
 	s.sortRegions()

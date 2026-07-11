@@ -52,6 +52,8 @@ void   ucs_context_free(ucs_engine *e, void *ctx);
 uc_err ucs_hook_code(ucs_engine *e, uint64_t *hookOut, uint64_t begin, uint64_t end, uint64_t cbid);
 uc_err ucs_hook_intr(ucs_engine *e, uint64_t *hookOut, uint64_t cbid);
 uc_err ucs_hook_mem_invalid(ucs_engine *e, uint64_t *hookOut, uint64_t cbid);
+uc_err ucs_hook_mem_read(ucs_engine *e, uint64_t *hookOut, uint64_t begin, uint64_t end, uint64_t cbid);
+uc_err ucs_hook_mem_write(ucs_engine *e, uint64_t *hookOut, uint64_t begin, uint64_t end, uint64_t cbid);
 uc_err ucs_hook_del(ucs_engine *e, uint64_t hook);
 
 #endif
