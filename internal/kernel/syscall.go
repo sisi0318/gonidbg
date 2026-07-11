@@ -167,9 +167,28 @@ func (c *Context) Snapshot() State {
 	return st
 }
 
+// BrkTop returns the page-aligned top of the currently mapped program break
+// (BrkBase when brk was never grown). The emulator snapshots [BrkBase, BrkTop)
+// as writable memory, since the brk heap is backed on the CPU engine directly
+// and isn't tracked in the mmap-arena allocator.
+func (c *Context) BrkTop() uint64 { return brkTopOf(c.brkCur) }
+
+func brkTopOf(brkCur uint64) uint64 {
+	if brkCur > BrkBase {
+		return pageUp(brkCur)
+	}
+	return BrkBase
+}
+
 // Restore rewinds the mutable kernel state to a prior Snapshot (clearing the
 // exit latch, program break, fd table, and FS overlay accumulated since).
 func (c *Context) Restore(st State) {
+	// Release brk pages grown since the snapshot so a later brk() can re-map them
+	// cleanly — sysBrk maps pages on growth, and re-mapping a still-mapped page
+	// fails, which would silently break the guest allocator on a reused instance.
+	if cur, tgt := c.BrkTop(), brkTopOf(st.brkCur); cur > tgt {
+		_ = c.B.MemUnmap(tgt, cur-tgt)
+	}
 	c.brkCur = st.brkCur
 	c.Exited = st.exited
 	c.ExitCode = st.exitCode

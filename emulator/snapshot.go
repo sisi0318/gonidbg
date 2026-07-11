@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"debug/elf"
 	"fmt"
 
 	"github.com/sisi0318/gonidbg/dvm"
@@ -23,12 +24,12 @@ import (
 // Not safe for concurrent use: hold the emulator exclusively (as a worker pool
 // does — one request per instance at a time) around Snapshot and Restore.
 type Snapshot struct {
-	cpu         emu.CPUContext   // full register file (GP + SIMD + SP/PC/PSTATE/TPIDR)
-	writable    []memWrite       // bytes of every writable region at snapshot time
-	layout      []memory.Region  // allocator region table
-	mmapTop     uint64           // allocator cursor
-	kstate      kernel.State     // brk / exit latch / fds / FS overlay
-	vmstate     dvm.VMState      // JNI object-handle table
+	cpu         emu.CPUContext  // full register file (GP + SIMD + SP/PC/PSTATE/TPIDR)
+	writable    []memWrite      // bytes of every writable guest region at snapshot time
+	layout      []memory.Region // mmap-arena allocator table
+	mmapTop     uint64          // mmap-arena cursor
+	kstate      kernel.State    // brk / exit latch / fds / FS overlay
+	vmstate     dvm.VMState     // JNI object-handle table
 	nextFiberID int
 }
 
@@ -38,32 +39,72 @@ type memWrite struct {
 	data []byte
 }
 
+type memRange struct {
+	addr uint64
+	size uint64
+	prot int
+}
+
+func pageDown(x uint64) uint64 { return x &^ 0xfff }
+func pageUp(x uint64) uint64   { return (x + 0xfff) &^ 0xfff }
+
+// writableGuestRanges lists every writable guest region whose bytes can change
+// during a call and therefore must be captured and restored. These live in
+// different maps — most are backed on the CPU engine directly and are NOT in the
+// mmap-arena allocator (Space) — so they're assembled explicitly:
+//
+//   - stack, TLS, import-stub trampolines (fixed regions mapped at boot),
+//   - each module's writable (.data/.bss) segments — the accumulating globals,
+//   - the brk heap [BrkBase, BrkTop),
+//   - the mmap arena (host scratch + guest mmap, the only Space-tracked set).
+func (e *Emulator) writableGuestRanges() []memRange {
+	rs := []memRange{
+		{stackBase, stackSize, emu.ProtRead | emu.ProtWrite},
+		{tlsBase, tlsSize, emu.ProtRead | emu.ProtWrite},
+		{stubBase, stubSize, emu.ProtAll},
+	}
+	for _, m := range e.modules {
+		for _, s := range m.Img.Segments {
+			if s.Flags&elf.PF_W == 0 {
+				continue // .text/.rodata never change across calls
+			}
+			va := m.Base + pageDown(s.Vaddr)
+			rs = append(rs, memRange{va, pageUp(s.Vaddr+s.MemSz) - pageDown(s.Vaddr), emu.ProtRead | emu.ProtWrite})
+		}
+	}
+	if top := e.kctx.BrkTop(); top > kernel.BrkBase {
+		rs = append(rs, memRange{kernel.BrkBase, top - kernel.BrkBase, emu.ProtRead | emu.ProtWrite})
+	}
+	for _, r := range e.mem.Regions() {
+		if r.Prot&emu.ProtWrite != 0 {
+			rs = append(rs, memRange{r.Addr, r.Size, r.Prot})
+		}
+	}
+	return rs
+}
+
 // Snapshot captures the current guest state. Take it once, right after New()
-// (which has already run init_array + JNI_OnLoad), then Restore before each
-// reused call. The returned Snapshot owns a backend CPU context; release it with
-// Free when the emulator is discarded.
+// (which has already run init_array + JNI_OnLoad) and after any Replace/patch
+// setup, then Restore before each reused call. The returned Snapshot owns a
+// backend CPU context; release it with Free when the emulator is discarded.
 func (e *Emulator) Snapshot() (*Snapshot, error) {
 	cpu, err := e.be.SaveContext()
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: save cpu: %w", err)
 	}
-	regs := e.mem.Regions()
-	layout := make([]memory.Region, len(regs))
-	copy(layout, regs)
-
 	var writable []memWrite
-	for _, r := range regs {
-		if r.Prot&emu.ProtWrite == 0 {
-			continue // code / rodata never changes across calls — no need to save
-		}
-		data, err := e.be.MemRead(r.Addr, r.Size)
+	for _, r := range e.writableGuestRanges() {
+		data, err := e.be.MemRead(r.addr, r.size)
 		if err != nil {
-			continue // unreadable (guard page etc.) — skip; nothing to restore
+			continue // unmapped hole (e.g. a gap between segments) — nothing to restore
 		}
 		buf := make([]byte, len(data))
 		copy(buf, data)
-		writable = append(writable, memWrite{addr: r.Addr, prot: r.Prot, data: buf})
+		writable = append(writable, memWrite{addr: r.addr, prot: r.prot, data: buf})
 	}
+	regs := e.mem.Regions()
+	layout := make([]memory.Region, len(regs))
+	copy(layout, regs)
 
 	return &Snapshot{
 		cpu:         cpu,
@@ -78,13 +119,14 @@ func (e *Emulator) Snapshot() (*Snapshot, error) {
 
 // Restore rewinds the emulator to snap. Call it before each reused invocation
 // (before writing this call's arguments) so the call runs against pristine
-// state. Cheap relative to a real sign: a few MiB of memcpy through the backend.
+// state. Cost is a memcpy of the writable footprint through the backend — a few
+// milliseconds, negligible against a real sign.
 func (e *Emulator) Restore(snap *Snapshot) error {
 	if snap == nil {
 		return fmt.Errorf("restore: nil snapshot")
 	}
-	// 1) Unmap everything the guest mapped after the snapshot (arena growth, brk
-	//    extension, guest mmaps) so the address space matches the snapshot again.
+	// 1) Unmap arena regions the guest mapped after the snapshot (scratch allocs,
+	//    guest mmaps) so the address space matches the snapshot again.
 	snapSet := make(map[uint64]uint64, len(snap.layout))
 	for _, r := range snap.layout {
 		snapSet[r.Addr] = r.Size
@@ -94,10 +136,13 @@ func (e *Emulator) Restore(snap *Snapshot) error {
 			_ = e.be.MemUnmap(r.Addr, r.Size)
 		}
 	}
-	// 2) Restore the allocator's region table + cursor.
+	// 2) Restore the arena allocator table + cursor.
 	e.mem.SetLayout(snap.layout, snap.mmapTop)
-	// 3) Restore writable memory bytes (re-map defensively if a region was split
-	//    or unmapped mid-call, e.g. by a guest MAP_FIXED over its own data).
+	// 3) Restore kernel state — this also unmaps brk pages grown during the call,
+	//    freeing those addresses before we write the snapshot brk bytes back.
+	e.kctx.Restore(snap.kstate)
+	// 4) Restore writable memory bytes: stack, TLS, stubs, .data/.bss, brk, arena.
+	//    Re-map defensively if a region was unmapped or split mid-call.
 	for _, w := range snap.writable {
 		if err := e.be.MemWrite(w.addr, w.data); err != nil {
 			_ = e.be.MemMap(w.addr, uint64(len(w.data)), w.prot)
@@ -106,15 +151,13 @@ func (e *Emulator) Restore(snap *Snapshot) error {
 			}
 		}
 	}
-	// 4) Restore the CPU register file (incl. SP → a fresh dirty-free stack top,
+	// 5) Restore the CPU register file (incl. SP → a fresh, dirty-free stack top,
 	//    TPIDR, PSTATE). CallFunc overwrites X0..X7/LR/PC for the next call.
 	if err := e.be.RestoreContext(snap.cpu); err != nil {
 		return fmt.Errorf("restore: cpu: %w", err)
 	}
-	// 5) Restore kernel + JNI bookkeeping.
-	e.kctx.Restore(snap.kstate)
+	// 6) Restore JNI object handles and reset per-run scheduler / JNI scratch.
 	e.vm.Restore(snap.vmstate)
-	// 6) Reset per-run scheduler / JNI scratch that accumulates across calls.
 	e.fibers = nil
 	e.curFiber = nil
 	e.nextFiberID = snap.nextFiberID
