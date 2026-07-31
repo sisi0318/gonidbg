@@ -35,8 +35,12 @@ type Sym struct {
 	Value uint64
 	Size  uint64
 	Undef bool
-	Bind  elf.SymBind
-	Type  elf.SymType
+	// Absolute marks SHN_ABS symbols, whose Value is a literal constant rather
+	// than an image-relative address — adding the load bias to one is wrong.
+	// Version pseudo-symbols ("LIBC", "LIBC_PRIVATE") are the common case.
+	Absolute bool
+	Bind     elf.SymBind
+	Type     elf.SymType
 }
 
 // Image is the parsed, ready-to-map representation of one .so.
@@ -54,6 +58,23 @@ type Image struct {
 	Init          uint64            // DT_INIT (0 if none)
 	Needed        []string
 	LoadSpan      uint64 // total virtual span to reserve
+}
+
+// exportable reports whether a defined dynamic symbol belongs in Exports, i.e.
+// whether its Value is an image-relative address another module may bind to.
+//
+// Three kinds get filtered out, all of which used to be exported and then had
+// the load bias added to them:
+//
+//   - SHN_ABS: version pseudo-symbols like "LIBC"/"LIBC_PRIVATE", whose value is
+//     a constant (usually 0, so they registered as base+0);
+//   - STB_LOCAL: not externally visible by definition;
+//   - STT_TLS: the value is an offset into the TLS block, not the image.
+func exportable(bind elf.SymBind, typ elf.SymType, absolute bool) bool {
+	if absolute || typ == elf.STT_TLS {
+		return false
+	}
+	return bind == elf.STB_GLOBAL || bind == elf.STB_WEAK
 }
 
 // Parse reads the ELF and builds the Image. base is not applied here; all
@@ -96,39 +117,64 @@ func Parse(path string) (*Image, error) {
 		img.Syms = append(img.Syms, Sym{Name: ""})
 		for _, s := range dyn {
 			undef := s.Section == elf.SHN_UNDEF
+			bind, typ := elf.ST_BIND(s.Info), elf.ST_TYPE(s.Info)
+			abs := s.Section == elf.SHN_ABS
 			img.Syms = append(img.Syms, Sym{
 				Name: s.Name, Value: s.Value, Size: s.Size, Undef: undef,
-				Bind: elf.ST_BIND(s.Info), Type: elf.ST_TYPE(s.Info),
+				Absolute: abs, Bind: bind, Type: typ,
 			})
-			if undef {
-				if s.Name != "" {
-					img.Imports = append(img.Imports, s.Name)
-				}
-			} else if s.Name != "" {
+			switch {
+			case s.Name == "":
+			case undef:
+				img.Imports = append(img.Imports, s.Name)
+			case exportable(bind, typ, abs):
 				img.Exports[s.Name] = s.Value
 			}
 		}
 	}
 
-	// Relocations: parse SHT_RELA sections manually (we need r_sym + type).
+	// Relocations: parse each section manually (we need r_sym + type). Beyond
+	// plain SHT_RELA this must cover the compressed encodings the NDK emits by
+	// default — see packed.go. Skipping them is silent: the library loads with
+	// its relative relocations unapplied.
+	implicit := implicitAddendFunc(f)
 	for _, sec := range f.Sections {
-		if sec.Type != elf.SHT_RELA {
-			continue
+		switch sec.Type {
+		case elf.SHT_RELA, elf.SHT_REL, shtAndroidRela, shtAndroidRel, shtRelr, shtAndroidRelr:
+		default:
+			continue // don't pay sec.Data() on .text and friends
 		}
 		data, err := sec.Data()
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", sec.Name, err)
 		}
-		for off := 0; off+24 <= len(data); off += 24 {
-			rOff := binary.LittleEndian.Uint64(data[off:])
-			rInfo := binary.LittleEndian.Uint64(data[off+8:])
-			rAdd := int64(binary.LittleEndian.Uint64(data[off+16:]))
-			img.Relocs = append(img.Relocs, Reloc{
-				Offset: rOff,
-				Type:   elf.R_AARCH64(rInfo & 0xffffffff),
-				Sym:    uint32(rInfo >> 32),
-				Addend: rAdd,
-			})
+		switch sec.Type {
+		case elf.SHT_RELA:
+			for off := 0; off+24 <= len(data); off += 24 {
+				rOff := binary.LittleEndian.Uint64(data[off:])
+				rInfo := binary.LittleEndian.Uint64(data[off+8:])
+				rAdd := int64(binary.LittleEndian.Uint64(data[off+16:]))
+				img.Relocs = append(img.Relocs, Reloc{
+					Offset: rOff,
+					Type:   elf.R_AARCH64(rInfo & 0xffffffff),
+					Sym:    uint32(rInfo >> 32),
+					Addend: rAdd,
+				})
+			}
+		case shtAndroidRela, shtAndroidRel:
+			var impl func(uint64) int64
+			if sec.Type == shtAndroidRel {
+				impl = implicit
+			}
+			rs, err := decodeAPS2(data, impl)
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", sec.Name, err)
+			}
+			img.Relocs = append(img.Relocs, rs...)
+		case shtRelr, shtAndroidRelr:
+			img.Relocs = append(img.Relocs, decodeRELR(data, implicit)...)
+		case elf.SHT_REL:
+			img.Relocs = append(img.Relocs, decodeREL(data, implicit)...)
 		}
 	}
 

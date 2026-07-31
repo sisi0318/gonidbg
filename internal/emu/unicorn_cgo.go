@@ -68,16 +68,22 @@ func lookupCB(id uint64) *hookReg {
 
 //export goCodeHook
 func goCodeHook(cbid C.uint64_t, addr C.uint64_t, size C.uint32_t) {
-	if e := lookupCB(uint64(cbid)); e != nil && e.code != nil {
-		e.code(e.be, uint64(addr), uint32(size))
+	e := lookupCB(uint64(cbid))
+	if e == nil || e.code == nil {
+		return
 	}
+	defer guardHook(e.be, "code")
+	e.code(e.be, uint64(addr), uint32(size))
 }
 
 //export goIntrHook
 func goIntrHook(cbid C.uint64_t, intno C.uint32_t) {
-	if e := lookupCB(uint64(cbid)); e != nil && e.intr != nil {
-		e.intr(e.be, uint32(intno))
+	e := lookupCB(uint64(cbid))
+	if e == nil || e.intr == nil {
+		return
 	}
+	defer guardHook(e.be, "interrupt")
+	e.intr(e.be, uint32(intno))
 }
 
 //export goMemHook
@@ -86,6 +92,7 @@ func goMemHook(cbid C.uint64_t, typ C.int, addr C.uint64_t, size C.int, value C.
 	if e == nil {
 		return 0
 	}
+	defer guardHook(e.be, "memory")
 	if e.memrd != nil { // valid-read hook (ranged); return value ignored by unicorn
 		e.memrd(e.be, uint64(addr), int(size))
 		return 0
@@ -224,6 +231,9 @@ func (b *unicornBackend) MemWrite(addr uint64, data []byte) error {
 func (b *unicornBackend) MemRead(addr uint64, size uint64) ([]byte, error) {
 	if size == 0 {
 		return nil, nil
+	}
+	if size > MaxMemReadLen {
+		return nil, fmt.Errorf("mem_read @0x%x: size %d exceeds MaxMemReadLen (%d)", addr, size, uint64(MaxMemReadLen))
 	}
 	buf := make([]byte, size)
 	if e := C.ucs_mem_read(b.e, C.uint64_t(addr), unsafe.Pointer(&buf[0]), C.size_t(size)); e != C.UC_ERR_OK {

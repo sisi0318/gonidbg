@@ -28,8 +28,11 @@ func (AbstractJni) CallStaticVoidMethodV(*VM, *Class, string, *VaList)          
 
 func (AbstractJni) GetObjectField(*VM, *Object, string) *Object      { return nil }
 func (AbstractJni) GetIntField(*VM, *Object, string) int32           { return 0 }
+func (AbstractJni) GetLongField(*VM, *Object, string) int64          { return 0 }
+func (AbstractJni) GetBooleanField(*VM, *Object, string) bool        { return false }
 func (AbstractJni) SetObjectField(*VM, *Object, string, *Object)     {}
 func (AbstractJni) GetStaticObjectField(*VM, *Class, string) *Object { return nil }
 func (AbstractJni) GetStaticIntField(*VM, *Class, string) int32      { return 0 }
+func (AbstractJni) GetStaticLongField(*VM, *Class, string) int64     { return 0 }
 
 func (AbstractJni) NewObjectV(*VM, *Class, string, *VaList) *Object { return nil }

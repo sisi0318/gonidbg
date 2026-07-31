@@ -58,9 +58,12 @@ func dynLookup(id uint64) *dynHookReg {
 
 //export goDynIntrHook
 func goDynIntrHook(cbid C.uint64_t, swi C.uint32_t) {
-	if e := dynLookup(uint64(cbid)); e != nil && e.intr != nil {
-		e.intr(e.be, uint32(swi))
+	e := dynLookup(uint64(cbid))
+	if e == nil || e.intr == nil {
+		return
 	}
+	defer guardHook(e.be, "interrupt")
+	e.intr(e.be, uint32(swi))
 }
 
 //export goDynMemHook
@@ -69,6 +72,7 @@ func goDynMemHook(cbid C.uint64_t, typ C.int, addr C.uint64_t, size C.int, value
 	if e == nil || e.mem == nil {
 		return 0
 	}
+	defer guardHook(e.be, "memory")
 	if e.mem(e.be, int(typ), uint64(addr), int(size), int64(value)) {
 		return 1
 	}
@@ -158,6 +162,9 @@ func (b *dynarmicBackend) MemWrite(addr uint64, data []byte) error {
 func (b *dynarmicBackend) MemRead(addr uint64, size uint64) ([]byte, error) {
 	if size == 0 {
 		return nil, nil
+	}
+	if size > MaxMemReadLen {
+		return nil, fmt.Errorf("mem_read @0x%x: size %d exceeds MaxMemReadLen (%d)", addr, size, uint64(MaxMemReadLen))
 	}
 	buf := make([]byte, size)
 	if e := C.dyn_mem_read(b.e, C.uint64_t(addr), unsafe.Pointer(&buf[0]), C.uint64_t(size)); e != C.DYN_OK {

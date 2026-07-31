@@ -41,21 +41,40 @@ func New(assetRoot string, pid int, procName string) *VFS {
 	return v
 }
 
+// assetBase is the guest path's final component, usable as a single filename
+// under the asset root, or "" if it isn't one.
+//
+// Guest paths are POSIX, so path.Base only splits on '/' and leaves a '\'
+// embedded in the component it returns. filepath.Join on Windows then treats
+// that '\' as a separator and cleans the ".." around it away, which walks the
+// result out of the asset root entirely — "/system/lib64/..\..\..\Windows\win.ini"
+// resolves to a real host file. Reject any separator of either flavour.
+func assetBase(guest string) string {
+	b := path.Base(guest)
+	if b == "." || b == ".." || b == "/" || strings.ContainsAny(b, `/\`) {
+		return ""
+	}
+	return b
+}
+
 // guest path -> host asset path. Returns "" if no static mapping.
 func (v *VFS) hostPath(guest string) string {
 	guest = path.Clean(guest)
 	sdk := filepath.Join(v.assetRoot, "android", "sdk23")
 	switch {
-	case strings.HasPrefix(guest, "/system/lib64/"):
-		return filepath.Join(sdk, "lib64", path.Base(guest))
-	case strings.HasPrefix(guest, "/apex/com.android.runtime/lib64/"):
-		return filepath.Join(sdk, "lib64", path.Base(guest))
+	case strings.HasPrefix(guest, "/system/lib64/"),
+		strings.HasPrefix(guest, "/apex/com.android.runtime/lib64/"):
+		if b := assetBase(guest); b != "" {
+			return filepath.Join(sdk, "lib64", b)
+		}
 	case guest == "/dev/__properties__":
 		return filepath.Join(sdk, "dev", "__properties__")
 	case guest == "/proc/stat":
 		return filepath.Join(sdk, "proc", "stat")
 	case strings.HasPrefix(guest, "/system/usr/share/zoneinfo/"):
-		return filepath.Join(sdk, "system", "usr", "share", "zoneinfo", path.Base(guest))
+		if b := assetBase(guest); b != "" {
+			return filepath.Join(sdk, "system", "usr", "share", "zoneinfo", b)
+		}
 	}
 	return ""
 }

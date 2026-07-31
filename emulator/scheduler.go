@@ -65,6 +65,7 @@ type fiber struct {
 	state    fiberState
 	waitAddr uint64 // futex uaddr it parked on
 	slices   int    // slices consumed (budget)
+	ret      uint64 // start_routine's return value, once state == fsDone
 }
 
 // newFiber registers a pthread_create'd start routine as a runnable fiber with
@@ -157,6 +158,19 @@ func (e *Emulator) parkFiber(f *fiber) {
 
 // runFiberSlice runs one fiber for up to one slice (until it yields, returns, or
 // the slice budget is spent), then snapshots it for later resumption.
+// fiberHandle is the fake pthread_t handed to the guest for a fiber.
+func fiberHandle(id int) uint64 { return uint64(0x7300 | id) }
+
+// fiberByHandle resolves a guest pthread_t back to its fiber (nil if unknown).
+func (e *Emulator) fiberByHandle(h uint64) *fiber {
+	for _, f := range e.fibers {
+		if fiberHandle(f.id) == h {
+			return f
+		}
+	}
+	return nil
+}
+
 func (e *Emulator) runFiberSlice(f *fiber) error {
 	e.curFiber = f
 	e.yieldReason = yieldNone
@@ -173,6 +187,14 @@ func (e *Emulator) runFiberSlice(f *fiber) error {
 		_ = e.be.RegWrite(emu.RegLR, sentinel)
 		f.started = true
 	} else {
+		// A parked fiber may have had its context freed already (parkFiber, or a
+		// failed SaveContext) while keeping started == true. RestoreContext(nil)
+		// errors, and the old error path then called Free() on the nil interface
+		// — a panic that took down the host process.
+		if f.ctx == nil {
+			f.state = fsParked
+			return nil
+		}
 		if err := e.be.RestoreContext(f.ctx); err != nil { // can't resume -> drop it
 			_ = f.ctx.Free()
 			f.ctx = nil
@@ -197,6 +219,7 @@ func (e *Emulator) runFiberSlice(f *fiber) error {
 
 	if pc, _ := e.be.RegRead(emu.RegPC); pc == sentinel {
 		f.state = fsDone
+		f.ret, _ = e.be.RegRead(emu.RegX0) // start_routine's return value, for pthread_join
 		return nil
 	}
 	// Yielded mid-execution — snapshot so we can resume from exactly here.

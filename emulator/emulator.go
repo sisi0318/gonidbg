@@ -64,6 +64,10 @@ type Config struct {
 	// fixed Unix time (seconds) instead of the host clock — for deterministic,
 	// reproducible runs (e.g. reverse-engineering a time-dependent signature).
 	Epoch int64
+	// RandSeed, if non-zero, pins getrandom to a ChaCha8 stream seeded with it
+	// instead of host entropy. Same purpose as Epoch: replaying a run whose guest
+	// nonces must come out identical. Leave zero for real randomness.
+	RandSeed int64
 }
 
 const defaultPid = 28859
@@ -115,9 +119,13 @@ type Emulator struct {
 	natives     map[string]uint64      // "class.name+sig" -> registered native fn ptr
 	methods     map[dvm.Ref]*methodRef // jmethodID -> (class, method)
 	fields      map[dvm.Ref]*fieldRef  // jfieldID -> (class, field)
-	classFilter map[string]bool        // FindClass allow-set (nil = allow all)
-	arrayPins   map[uint64]dvm.Ref     // GetByteArrayElements ptr -> array ref (copy-back)
-	pendingExc  bool                   // a pending JNI exception (Throw/ThrowNew)
+	// staticFields backs SetStatic<Type>Field/GetStatic<Type>Field, keyed by
+	// "Class->name:Sig". Kept here rather than on dvm.Class because Restore
+	// rewinds this map but deliberately never rewinds the class registry.
+	staticFields map[string]uint64
+	classFilter  map[string]bool    // FindClass allow-set (nil = allow all)
+	arrayPins    map[uint64]dvm.Ref // GetByteArrayElements ptr -> array ref (copy-back)
+	pendingExc   bool               // a pending JNI exception (Throw/ThrowNew)
 
 	hostByName map[string]hostFn // libc funcs we implement in Go (override bionic)
 	hostImpl   map[uint64]hostFn // svc addr -> host impl
@@ -175,7 +183,7 @@ func (e *Emulator) Engine() string { return e.engine }
 
 // New boots an emulator: prepares the address space, maps bionic, and (if
 // Config.SOPath is set) loads + initializes the main library.
-func New(cfg Config) (*Emulator, error) {
+func New(cfg Config) (_ *Emulator, err error) {
 	engine, err := emu.Resolve(cfg.Engine)
 	if err != nil {
 		return nil, fmt.Errorf("backend: %w", err)
@@ -184,31 +192,41 @@ func New(cfg Config) (*Emulator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backend(%s): %w", engine, err)
 	}
+	// Release the engine on any failure from here on. Only the boot() error used
+	// to do this, so a pool retrying New() after a transient failure (a bad
+	// DexPath, MemMap under memory pressure) leaked a live engine each time —
+	// and on Windows a dedicated, never-joined C thread with it.
+	defer func() {
+		if err != nil {
+			_ = be.Close()
+		}
+	}()
 	pid := cfg.Pid
 	if pid == 0 {
 		pid = defaultPid
 	}
 	e := &Emulator{
-		cfg:         cfg,
-		engine:      engine,
-		be:          be,
-		mem:         memory.NewSpace(),
-		vm:          dvm.NewVM(),
-		fs:          vfs.New(cfg.AssetRoot, pid, cfg.ProcessName),
-		syms:        map[string]uint64{},
-		nextBase:    moduleBase,
-		nextStub:    stubBase,
-		stubs:       map[uint64]string{},
-		stubHits:    map[string]int{},
-		hostByName:  map[string]hostFn{},
-		hostImpl:    map[uint64]hostFn{},
-		replaced:    map[uint64]hostFn{},
-		jniDispatch: map[uint64]int{},
-		classRefs:   map[string]dvm.Ref{},
-		natives:     map[string]uint64{},
-		methods:     map[dvm.Ref]*methodRef{},
-		fields:      map[dvm.Ref]*fieldRef{},
-		arrayPins:   map[uint64]dvm.Ref{},
+		cfg:          cfg,
+		engine:       engine,
+		be:           be,
+		mem:          memory.NewSpace(),
+		vm:           dvm.NewVM(),
+		fs:           vfs.New(cfg.AssetRoot, pid, cfg.ProcessName),
+		syms:         map[string]uint64{},
+		nextBase:     moduleBase,
+		nextStub:     stubBase,
+		stubs:        map[uint64]string{},
+		stubHits:     map[string]int{},
+		hostByName:   map[string]hostFn{},
+		hostImpl:     map[uint64]hostFn{},
+		replaced:     map[uint64]hostFn{},
+		jniDispatch:  map[uint64]int{},
+		classRefs:    map[string]dvm.Ref{},
+		natives:      map[string]uint64{},
+		methods:      map[dvm.Ref]*methodRef{},
+		fields:       map[dvm.Ref]*fieldRef{},
+		arrayPins:    map[uint64]dvm.Ref{},
+		staticFields: map[string]uint64{},
 	}
 	if cfg.FileResolver != nil {
 		e.fs.SetFallback(cfg.FileResolver)
@@ -229,7 +247,7 @@ func New(cfg Config) (*Emulator, error) {
 		}
 	}
 	registerHostFns(e) // libc functions we implement in Go (need no libc init)
-	e.kctx = &kernel.Context{B: be, Mem: e.mem, VFS: e.fs, Pid: pid, Verbose: cfg.Verbose, Epoch: cfg.Epoch}
+	e.kctx = &kernel.Context{B: be, Mem: e.mem, VFS: e.fs, Pid: pid, Verbose: cfg.Verbose, Epoch: cfg.Epoch, RandSeed: cfg.RandSeed}
 
 	// Reserve fixed regions.
 	if err := be.MemMap(stubBase, stubSize, emu.ProtAll); err != nil {
@@ -348,7 +366,7 @@ func (e *Emulator) LoadModule(path, name string) (*Module, error) {
 }
 
 // resolveSymbol satisfies loader.Resolver: global export, else a svc stub.
-func (e *Emulator) resolveSymbol(name string) (uint64, bool) {
+func (e *Emulator) resolveSymbol(name string, weak bool) (uint64, bool) {
 	if fn, ok := e.hostByName[name]; ok { // Go override for libc funcs needing init
 		a := e.makeStub("host:" + name)
 		e.hostImpl[a] = fn
@@ -356,6 +374,14 @@ func (e *Emulator) resolveSymbol(name string) (uint64, bool) {
 	}
 	if a, ok := e.syms[name]; ok {
 		return a, true
+	}
+	if weak {
+		// Nothing defines it, and it is only weakly referenced — leave it NULL so
+		// the guest's `if (&sym) sym();` probe answers correctly. A stub here
+		// would be non-NULL, sending every such probe down the "present" branch:
+		// a library that tests for __cxa_thread_atexit_impl would take the modern
+		// path and then silently never run its TLS destructors.
+		return 0, false
 	}
 	return e.makeStub(name), true
 }
@@ -393,6 +419,10 @@ func (e *Emulator) SetupJNI() uint64 {
 	e.getEnvStub = e.makeStub("JavaVM!GetEnv")
 	_ = putU64(e.be, vmTable+6*8, e.getEnvStub) // GetEnv
 	_ = putU64(e.be, vmTable+4*8, e.getEnvStub) // AttachCurrentThread (also yields env)
+	// AttachCurrentThreadAsDaemon: a generic stub would answer JNI_OK without
+	// writing *p_env, and the worker thread would then dereference an
+	// uninitialised stack slot as its JNIEnv*. It yields an env just like slot 4.
+	_ = putU64(e.be, vmTable+7*8, e.getEnvStub)
 	vmPtr := e.Alloc(8, emu.ProtRead|emu.ProtWrite)
 	_ = putU64(e.be, vmPtr, vmTable)
 	e.javaVM = vmPtr
@@ -418,6 +448,35 @@ func (e *Emulator) JNIEnv() uint64 {
 
 // Sym returns a resolved global symbol address.
 func (e *Emulator) Sym(name string) (uint64, bool) { a, ok := e.syms[name]; return a, ok }
+
+// insnAt reads the 4-byte instruction at addr.
+func (e *Emulator) insnAt(addr uint64) (uint32, bool) {
+	raw, err := e.be.MemRead(addr, 4)
+	if err != nil || len(raw) < 4 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(raw), true
+}
+
+// AArch64 exception-generating instructions, all in the same encoding group and
+// distinguished by bits 23:21 (imm16 sits at 20:5).
+func isSVCInsn(insn uint32) bool { return insn&0xffe0001f == 0xd4000001 } // SVC #imm
+func isTrapInsn(insn uint32) bool { // BRK / HLT — do NOT advance PC
+	op := insn & 0xffe0001f
+	return op == 0xd4200000 || op == 0xd4400000
+}
+
+// isGuestSyscall reports whether the exception that stopped execution at pc was
+// really an SVC. An SVC advances PC, so the instruction lives at pc-4; a BRK or
+// HLT leaves PC on the trapping instruction itself, which matters because pc-4
+// could then be an unrelated (already-serviced) SVC.
+func (e *Emulator) isGuestSyscall(pc uint64) bool {
+	if cur, ok := e.insnAt(pc); ok && isTrapInsn(cur) {
+		return false
+	}
+	prev, ok := e.insnAt(pc - 4)
+	return ok && isSVCInsn(prev)
+}
 
 // onInterrupt handles SVC: a stub call (unresolved import) or a real syscall.
 func (e *Emulator) onInterrupt(b emu.Backend, intno uint32) {
@@ -449,6 +508,25 @@ func (e *Emulator) onInterrupt(b emu.Backend, intno uint32) {
 		_ = b.RegWrite(emu.RegX0, 0) // optimistic default
 		return
 	}
+	// Nothing above matched, so this is about to be serviced as a guest syscall.
+	// Check that it actually is one first: unicorn routes *every* AArch64
+	// exception through this hook (undefined instruction, BRK, ...) and reports
+	// a QEMU EXCP_* code in intno, while dynarmic only calls it for SVC and puts
+	// the SVC immediate there — so intno alone can't be trusted to mean the same
+	// thing. The instruction can.
+	//
+	// Getting this wrong is not subtle: an obfuscated .so executing `brk #0` (a
+	// standard anti-debug trap) would run whatever syscall X8 happened to hold —
+	// 215 is munmap on live guest memory, 94 is exit_group. And because a
+	// synchronous debug exception does not advance PC, it would repeat until the
+	// runaway guard tripped.
+	if !e.isGuestSyscall(pc) {
+		insn, _ := e.insnAt(pc)
+		fmt.Printf("[cpu] non-syscall exception at pc=0x%x (insn=%#08x intno=%d) %s — stopping\n",
+			pc, insn, intno, e.NearestSym(pc))
+		_ = b.Stop()
+		return
+	}
 	// Scheduler hooks (futex / nanosleep) drive cooperative switching — futex
 	// WAKE wakes parked fibers regardless of caller; WAIT/sleep yield a fiber.
 	if num, _ := b.RegRead(emu.RegX8); e.handleSchedSyscall(b, num) {
@@ -475,6 +553,9 @@ func (e *Emulator) onInterrupt(b emu.Backend, intno uint32) {
 // CallFunc invokes guest code at addr with up to 8 integer args (X0..X7),
 // returning X0. LR is set to a sentinel so emulation stops on return.
 func (e *Emulator) CallFunc(addr uint64, args ...uint64) (uint64, error) {
+	if e.closed() {
+		return 0, errClosed
+	}
 	regs := []emu.Reg{emu.RegX0, emu.RegX1, emu.RegX2, emu.RegX3, emu.RegX4, emu.RegX5, emu.RegX6, emu.RegX7}
 	if len(args) > len(regs) {
 		return 0, fmt.Errorf("CallFunc: >8 args not supported")
@@ -490,6 +571,17 @@ func (e *Emulator) CallFunc(addr uint64, args ...uint64) (uint64, error) {
 	e.scCount = 0
 	if err := e.be.Start(addr, sentinel); err != nil {
 		return 0, fmt.Errorf("emu_start @0x%x: %w", addr, err)
+	}
+	// Start returns nil for ANY clean stop, not just "returned to the sentinel":
+	// a guest exit(), the runaway-syscall guard, a Hook calling Stop(), or the
+	// debugger quitting all land here. Without this check X0 is whatever happened
+	// to be live at the stop point and the caller gets a plausible wrong answer
+	// with err == nil.
+	if pc, err := e.be.RegRead(emu.RegPC); err == nil && pc != sentinel {
+		if e.kctx.Exited {
+			return 0, fmt.Errorf("call @0x%x: guest exited (code %d) before returning", addr, e.kctx.ExitCode)
+		}
+		return 0, fmt.Errorf("call @0x%x: stopped at 0x%x, not the return sentinel", addr, pc)
 	}
 	return e.be.RegRead(emu.RegX0)
 }
@@ -582,8 +674,31 @@ func (e *Emulator) InitArrayPtrs(m *Module) ([]uint64, error) {
 
 // Close releases the backend.
 func (e *Emulator) Close() error {
-	if e.be != nil {
-		return e.be.Close()
+	if e.be == nil {
+		return nil // already closed
 	}
-	return nil
+	// Suspended fibers hold backend CPU contexts. Those are separate C
+	// allocations that uc_close does not own, and nothing finalizes them, so
+	// dropping the slice would leak one per parked guest thread. They must also
+	// be freed *before* the engine goes away — freeing a context afterwards
+	// dereferences a dead engine.
+	for _, f := range e.fibers {
+		if f.ctx != nil {
+			_ = f.ctx.Free()
+			f.ctx = nil
+		}
+	}
+	e.fibers, e.curFiber = nil, nil
+	be := e.be
+	// Drop the reference first: every other method dispatches straight into C
+	// with no nil check there, so a use-after-Close would be an access violation
+	// with no Go stack. With e.be nil it is an ordinary error instead.
+	e.be = nil
+	return be.Close()
 }
+
+// errClosed is returned by operations attempted after Close.
+var errClosed = fmt.Errorf("emulator: closed")
+
+// closed reports whether Close has been called.
+func (e *Emulator) closed() bool { return e.be == nil }

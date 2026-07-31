@@ -15,7 +15,12 @@
 // testable without a C toolchain (a pure-Go build registers no backend).
 package emu
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"runtime/debug"
+)
 
 // ErrNoBackend is returned when no CPU backend is compiled in (a pure-Go build
 // with neither the `unicorn` nor the `dynarmic` build tag).
@@ -79,6 +84,8 @@ type Backend interface {
 	MemUnmap(addr, size uint64) error
 	MemProtect(addr, size uint64, prot int) error
 	MemWrite(addr uint64, data []byte) error
+	// MemRead reads size bytes. Implementations must reject size > MaxMemReadLen
+	// rather than allocating first — see that constant.
 	MemRead(addr uint64, size uint64) ([]byte, error)
 
 	// Hooks
@@ -113,6 +120,41 @@ type Backend interface {
 
 	Close() error
 }
+
+// guardHook contains a panic raised inside a hook callback. Defer it at the top
+// of every //export'ed trampoline.
+//
+// Those trampolines are called from C, and a Go panic unwinding through a cgo
+// frame aborts the process — there is no Go stack for it to unwind into. The
+// hook bodies reach the whole syscall table and the JNI dispatcher, so a single
+// index-out-of-range down there would take the host down with no recovery
+// point; in a pooled server that is every in-flight request, not just the one
+// that tripped it. On Windows it is worse than a crash: the abort skips the
+// engine thread's SetEvent(done), so anything waiting on it hangs forever.
+//
+// A panicking hook stops the engine instead, which reaches the caller as a
+// failed emulation.
+func guardHook(be Backend, what string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "gonidbg: panic in %s hook: %v\n%s\n", what, r, debug.Stack())
+	if be != nil {
+		_ = be.Stop()
+	}
+}
+
+// MaxMemReadLen bounds MemRead's host-side allocation.
+//
+// Several syscall paths hand MemRead a length straight out of a guest register
+// (write, writev, and anything reading a guest-supplied buffer). Allocating
+// before the engine gets a chance to reject the range means a bogus length —
+// trivially produced by obfuscated code, or by a corrupted length field — is a
+// multi-GiB make(), and that is a fatal runtime error no recover() can catch,
+// not an error the caller can handle. 256 MiB is well above any legitimate
+// read; the largest in-tree is an 8 MiB heap dump.
+const MaxMemReadLen = 256 << 20
 
 // HookHandle lets a hook be removed.
 type HookHandle interface{ Remove() error }

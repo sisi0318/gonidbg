@@ -21,7 +21,7 @@ func registerHostFns(e *Emulator) {
 	// no-op it as success. Threads the .so spawns (watchdogs / bg init) are
 	// skipped; revisit if the call path needs a thread's output.
 	e.hostByName["pthread_create"] = hostPthreadCreate
-	e.hostByName["pthread_join"] = hostRet0
+	e.hostByName["pthread_join"] = hostPthreadJoin
 	e.hostByName["pthread_detach"] = hostRet0
 
 	// __system_property_get: only override (for the loaded .so) when the host app
@@ -68,7 +68,35 @@ func hostPthreadCreate(e *Emulator, b emu.Backend) {
 		fmt.Printf("[pthread_create] fiber %d routine=0x%x (%s) arg=0x%x\n", f.id, routine, e.NearestSym(routine), arg)
 	}
 	if thr != 0 {
-		_ = putU64(b, thr, uint64(0x7300|f.id)) // fake pthread_t (distinct per fiber)
+		_ = putU64(b, thr, fiberHandle(f.id)) // fake pthread_t (distinct per fiber)
+	}
+	_ = b.RegWrite(emu.RegX0, 0)
+}
+
+// hostPthreadJoin(thread, void** retval) returns the fiber's result if it has
+// already run, and NULL otherwise.
+//
+// A faithful join would suspend the caller, run the target fiber to completion
+// and resume — but we are inside the top-level emu_start and unicorn cannot
+// nest one, so a fiber can still only run when RunThreads drives the scheduler
+// between top-level calls. What is fixed here is the silent part: this used to
+// be hostRet0, which reported success without ever touching retval, so the
+// canonical `pthread_join(t, &out); use(out);` read an uninitialised stack slot
+// and dereferenced it as a pointer. Writing a defined NULL turns that into a
+// path the guest's own error handling can see.
+func hostPthreadJoin(e *Emulator, b emu.Backend) {
+	tid, _ := b.RegRead(emu.RegX0)
+	retp, _ := b.RegRead(emu.RegX1)
+	var result uint64
+	f := e.fiberByHandle(tid)
+	if f != nil && f.state == fsDone {
+		result = f.ret
+	} else if f != nil && e.cfg.Verbose {
+		fmt.Printf("[pthread_join] fiber %d has not run yet — returning *retval=NULL "+
+			"(drive RunThreads between top-level calls to let it run)\n", f.id)
+	}
+	if retp != 0 {
+		_ = putU64(b, retp, result)
 	}
 	_ = b.RegWrite(emu.RegX0, 0)
 }

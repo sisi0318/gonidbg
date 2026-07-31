@@ -26,6 +26,47 @@ type Ref int32
 type Object struct {
 	Class *Class
 	Value any // Go-side payload: string, []byte, int64, *Class, or arbitrary
+	// fields backs Set<Type>Field/Get<Type>Field. The canonical JNI "native peer"
+	// idiom — nativeInit() stashing a context pointer with SetLongField and every
+	// later entry point reading it back with GetLongField — only works if a value
+	// the guest wrote is a value the guest can read. Without storage the getter
+	// falls to the Jni handler, which by default returns 0, and the .so
+	// dereferences NULL. Keyed by the "Class->name:Sig" string the dispatcher
+	// builds. Use Field/SetField; nil until first write.
+	fields map[string]any
+}
+
+// SetField stores a field value on this object (see Object.fields).
+func (o *Object) SetField(sig string, v any) {
+	if o.fields == nil {
+		o.fields = map[string]any{}
+	}
+	o.fields[sig] = v
+}
+
+// Field returns a previously stored field value. ok is false when the guest (or
+// host) never wrote one, in which case the caller should ask the Jni handler.
+func (o *Object) Field(sig string) (v any, ok bool) {
+	if o.fields == nil {
+		return nil, false
+	}
+	v, ok = o.fields[sig]
+	return
+}
+
+// clone copies the object for snapshotting: the field map is per-call mutable
+// state and must not be shared with the snapshot, or a write during call N
+// would still be visible after the rewind. Value is deliberately shared — it is
+// the host-supplied payload, and copying it would change ArgBytes semantics.
+func (o *Object) clone() *Object {
+	c := &Object{Class: o.Class, Value: o.Value}
+	if o.fields != nil {
+		c.fields = make(map[string]any, len(o.fields))
+		for k, v := range o.fields {
+			c.fields[k] = v
+		}
+	}
+	return c
 }
 
 // Class is a resolved Java class plus its registered methods/fields.
@@ -73,12 +114,17 @@ type Jni interface {
 	CallStaticIntMethodV(vm *VM, cls *Class, sig string, args *VaList) int32
 	CallStaticVoidMethodV(vm *VM, cls *Class, sig string, args *VaList)
 
-	// Field access.
+	// Field access. Only consulted when the guest has not itself written the
+	// field — see Object.SetField — so the native-peer idiom round-trips without
+	// the host modelling anything.
 	GetObjectField(vm *VM, obj *Object, sig string) *Object
 	GetIntField(vm *VM, obj *Object, sig string) int32
+	GetLongField(vm *VM, obj *Object, sig string) int64
+	GetBooleanField(vm *VM, obj *Object, sig string) bool
 	SetObjectField(vm *VM, obj *Object, sig string, val *Object)
 	GetStaticObjectField(vm *VM, cls *Class, sig string) *Object
 	GetStaticIntField(vm *VM, cls *Class, sig string) int32
+	GetStaticLongField(vm *VM, cls *Class, sig string) int64
 
 	// NewObjectV constructs an instance (jobject) — return a boxed Object to
 	// override the default (an empty instance of cls).
@@ -158,7 +204,7 @@ func (vm *VM) Snapshot() VMState {
 	defer vm.mu.Unlock()
 	objs := make(map[Ref]*Object, len(vm.objs))
 	for k, v := range vm.objs {
-		objs[k] = v
+		objs[k] = v.clone()
 	}
 	return VMState{nextRef: vm.nextRef, objs: objs}
 }
@@ -171,7 +217,7 @@ func (vm *VM) Restore(st VMState) {
 	vm.nextRef = st.nextRef
 	vm.objs = make(map[Ref]*Object, len(st.objs))
 	for k, v := range st.objs {
-		vm.objs[k] = v
+		vm.objs[k] = v.clone()
 	}
 }
 

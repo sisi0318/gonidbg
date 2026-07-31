@@ -10,8 +10,10 @@
 package kernel
 
 import (
+	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/sisi0318/gonidbg/internal/emu"
@@ -86,9 +88,14 @@ const (
 	EPERM  = 1
 	EBADF  = 9
 	ENOENT = 2
+	EFAULT = 14
 	EINVAL = 22
 	ERANGE = 34
 )
+
+// maxRWLen is Linux's MAX_RW_COUNT: the kernel silently clamps read/write/
+// getrandom counts to this rather than honouring an absurd guest-supplied size.
+const maxRWLen = 0x7ffff000
 
 // Context is the state a syscall handler operates on.
 type Context struct {
@@ -101,6 +108,12 @@ type Context struct {
 	// (seconds) instead of the host clock — for deterministic, reproducible runs
 	// (reverse-engineering: the same inputs must yield the same signature).
 	Epoch int64
+	// RandSeed, if non-zero, pins getrandom to a ChaCha8 stream seeded with it
+	// instead of host entropy — the same determinism trade-off as Epoch, for
+	// replaying a run whose guest nonces must come out identical. The stream
+	// position is part of Snapshot/Restore, so a rewound instance re-issues the
+	// same bytes.
+	RandSeed int64
 
 	brkCur   uint64 // current program break (0 = uninitialized)
 	Exited   bool   // guest called exit/exit_group
@@ -110,6 +123,26 @@ type Context struct {
 	nextFd int32
 	wfiles map[string][]byte // writable in-memory FS overlay (e.g. /mssdk/ml/*)
 	dirs   map[string]bool   // directories created via mkdirat
+	rng    *rand.ChaCha8     // pinned getrandom stream; nil unless RandSeed is set
+}
+
+// randRead fills buf with host entropy, or with the pinned ChaCha8 stream when
+// RandSeed is set. The previous implementation iterated seed = seed*31+7 over a
+// byte, which has period 16 (31^8 == 1 mod 256 and the affine sum is 128), so a
+// 32-byte nonce was one 16-byte block repeated and a 16-byte key had 256
+// possible values — enough for a target's entropy check to notice.
+func (c *Context) randRead(buf []byte) error {
+	if c.RandSeed == 0 {
+		_, err := crand.Read(buf)
+		return err
+	}
+	if c.rng == nil {
+		var seed [32]byte
+		binary.LittleEndian.PutUint64(seed[:], uint64(c.RandSeed))
+		c.rng = rand.NewChaCha8(seed)
+	}
+	_, err := c.rng.Read(buf)
+	return err
 }
 
 type openFile struct {
@@ -140,6 +173,7 @@ type State struct {
 	files    map[int32]*openFile
 	wfiles   map[string][]byte
 	dirs     map[string]bool
+	rng      []byte // marshalled ChaCha8 position; nil when getrandom isn't pinned
 }
 
 // Snapshot deep-copies the mutable kernel state.
@@ -163,6 +197,9 @@ func (c *Context) Snapshot() State {
 		for k, v := range c.dirs {
 			st.dirs[k] = v
 		}
+	}
+	if c.rng != nil {
+		st.rng, _ = c.rng.MarshalBinary()
 	}
 	return st
 }
@@ -196,6 +233,14 @@ func (c *Context) Restore(st State) {
 	c.files = copyFiles(st.files)
 	c.wfiles = copyWfiles(st.wfiles)
 	c.dirs = copyDirs(st.dirs)
+	// Rewind the pinned getrandom stream so a reused instance re-issues the same
+	// nonces; leave it alone when nothing was pinned (host entropy has no state).
+	switch {
+	case st.rng != nil && c.rng != nil:
+		_ = c.rng.UnmarshalBinary(st.rng)
+	case st.rng == nil:
+		c.rng = nil
+	}
 }
 
 func copyFiles(in map[int32]*openFile) map[int32]*openFile {
@@ -373,7 +418,13 @@ func sysWrite(c *Context, a [6]uint64) int64 {
 		f.pos = end
 		return int64(len(d))
 	}
-	// otherwise it's stdout/stderr/log -> surface it only when tracing
+	// stdin/stdout/stderr are always valid and are never in the table; anything
+	// else must have been opened. Accepting every fd let a guest write to a
+	// closed or never-opened descriptor and be told it succeeded.
+	if sfd := int32(fd); sfd < 0 || sfd > 2 {
+		return -EBADF
+	}
+	// stdout/stderr -> surface it only when tracing
 	if c.Verbose && n > 0 && n < 0x10000 {
 		if d, err := c.B.MemRead(buf, n); err == nil {
 			fmt.Printf("[write fd=%d] %s\n", fd, string(d))
@@ -503,13 +554,29 @@ func sysRead(c *Context, a [6]uint64) int64 {
 	if n <= 0 {
 		return 0
 	}
-	c.B.MemWrite(a[1], data[f.pos:f.pos+n])
+	// Honour the write fault: reporting n bytes that never landed advances the
+	// guest's stream position over data it never received, and it then parses
+	// whatever was already in the buffer. Linux returns -EFAULT and does not
+	// move the offset.
+	if err := c.B.MemWrite(a[1], data[f.pos:f.pos+n]); err != nil {
+		return -EFAULT
+	}
 	f.pos += n
 	return n
 }
 
 func sysClose(c *Context, a [6]uint64) int64 {
-	delete(c.fdTable(), int32(a[0]))
+	fd := int32(a[0])
+	// stdin/stdout/stderr are never in the table but are always valid to the
+	// guest; everything else must exist. Returning 0 for an unknown fd both
+	// masks guest use-after-close and fails the `close(-1) == -1 && errno ==
+	// EBADF` probe anti-emulation code uses.
+	if fd < 0 || fd > 2 {
+		if _, ok := c.fdTable()[fd]; !ok {
+			return -EBADF
+		}
+	}
+	delete(c.fdTable(), fd)
 	return 0
 }
 
@@ -553,14 +620,37 @@ func sysFaccessat(c *Context, a [6]uint64) int64 {
 	return -ENOENT
 }
 
+// inoFor derives a stable, non-zero inode number from a guest path, so two
+// different files never look like the same file to `(st_dev, st_ino)` dedupe.
+func inoFor(path string) uint64 {
+	h := uint64(1469598103934665603) // FNV-1a offset basis
+	for i := 0; i < len(path); i++ {
+		h = (h ^ uint64(path[i])) * 1099511628211
+	}
+	if h == 0 {
+		h = 1
+	}
+	return h
+}
+
 // writeStat fills a Linux arm64 `struct stat` (128 bytes).
-func writeStat(c *Context, addr uint64, size int64, isDir bool) {
-	var st [128]byte
+func writeStat(c *Context, addr uint64, size int64, isDir bool, path string) {
 	mode := uint32(0x81a4) // S_IFREG|0644
 	if isDir {
 		mode = 0x41ed // S_IFDIR|0755
 	}
-	binary.LittleEndian.PutUint32(st[16:], mode)                   // st_mode
+	writeStatMode(c, addr, size, mode, inoFor(path))
+}
+
+// writeStatMode is writeStat with an explicit st_mode (character devices etc.).
+func writeStatMode(c *Context, addr uint64, size int64, mode uint32, ino uint64) {
+	var st [128]byte
+	binary.LittleEndian.PutUint64(st[0:], 1)     // st_dev
+	binary.LittleEndian.PutUint64(st[8:], ino)   // st_ino
+	binary.LittleEndian.PutUint32(st[16:], mode) // st_mode
+	// st_nlink 0 marks a *deleted* inode, and guest code that checks it rejects
+	// every file we report.
+	binary.LittleEndian.PutUint32(st[20:], 1)                      // st_nlink
 	binary.LittleEndian.PutUint64(st[48:], uint64(size))           // st_size
 	binary.LittleEndian.PutUint32(st[56:], 0x1000)                 // st_blksize
 	binary.LittleEndian.PutUint64(st[64:], uint64((size+511)/512)) // st_blocks
@@ -568,18 +658,26 @@ func writeStat(c *Context, addr uint64, size int64, isDir bool) {
 }
 
 func sysFstat(c *Context, a [6]uint64) int64 {
-	f := c.fdTable()[int32(a[0])]
+	fd := int32(a[0])
+	f := c.fdTable()[fd]
 	if f == nil {
+		// stdio is never in the table, but fstat on it always succeeds on a real
+		// kernel — bionic's stdio buffering path does `if (fstat(2,&st) < 0)`
+		// and gives up when it fails. Report a character device.
+		if fd >= 0 && fd <= 2 {
+			writeStatMode(c, a[1], 0, 0x2190, uint64(fd)+1) // S_IFCHR|0620
+			return 0
+		}
 		return -EBADF
 	}
-	writeStat(c, a[1], int64(len(c.fileData(f))), false)
+	writeStat(c, a[1], int64(len(c.fileData(f))), false, f.path)
 	return 0
 }
 
 func sysNewfstatat(c *Context, a [6]uint64) int64 {
 	path := c.readCStr(a[1])
 	if c.dirs[path] {
-		writeStat(c, a[2], 4096, true)
+		writeStat(c, a[2], 4096, true, path)
 		if c.Verbose {
 			fmt.Printf("[newfstatat] %q -> dir\n", path)
 		}
@@ -597,7 +695,7 @@ func sysNewfstatat(c *Context, a [6]uint64) int64 {
 		}
 		return -ENOENT
 	}
-	writeStat(c, a[2], size, false)
+	writeStat(c, a[2], size, false, path)
 	if c.Verbose {
 		fmt.Printf("[newfstatat] %q -> size=%d\n", path, size)
 	}
@@ -664,18 +762,40 @@ func sysGettimeofday(c *Context, a [6]uint64) int64 {
 	return 0
 }
 
-// sysGetrandom fills the buffer with a deterministic-ish stream (good enough for
-// emulation; not cryptographically meaningful here).
+// sysGetrandom fills the guest buffer with real entropy, or with a pinned
+// ChaCha8 stream when RandSeed is set (see Context.RandSeed).
+//
+// It fills in bounded chunks so a bogus guest length can't drive a huge host
+// allocation, and it honours the MemWrite error instead of reporting bytes that
+// never landed — Linux returns -EFAULT for an unwritable buffer and a short
+// count if only part of it is writable.
 func sysGetrandom(c *Context, a [6]uint64) int64 {
-	n := a[1]
-	buf := make([]byte, n)
-	seed := byte(a[0] ^ n)
-	for i := range buf {
-		seed = seed*31 + 7
-		buf[i] = seed
+	dst, n := a[0], a[1]
+	if n > maxRWLen {
+		n = maxRWLen
 	}
-	c.B.MemWrite(a[0], buf)
-	return int64(n)
+	buf := make([]byte, min(n, 4096))
+	var done uint64
+	for done < n {
+		b := buf
+		if rem := n - done; rem < uint64(len(b)) {
+			b = b[:rem]
+		}
+		if err := c.randRead(b); err != nil {
+			if done == 0 {
+				return -EINVAL
+			}
+			break
+		}
+		if err := c.B.MemWrite(dst+done, b); err != nil {
+			if done == 0 {
+				return -EFAULT
+			}
+			break
+		}
+		done += uint64(len(b))
+	}
+	return int64(done)
 }
 
 func sysMunmap(c *Context, a [6]uint64) int64 {
@@ -723,7 +843,12 @@ func sysUname(c *Context, a [6]uint64) int64 {
 // sysSysinfo fills a plausible `struct sysinfo` (LP64 layout) — enough RAM/uptime
 // for libc heuristics; not real host stats.
 func sysSysinfo(c *Context, a [6]uint64) int64 {
-	var st [128]byte
+	// sizeof(struct sysinfo) is 112 on LP64: uptime(0) loads[3](8) totalram(32)
+	// freeram(40) sharedram(48) bufferram(56) totalswap(64) freeswap(72)
+	// procs(80) pad(82) totalhigh(88) freehigh(96) mem_unit(104) _f[0].
+	// Writing more smashes the caller's stack — bionic's get_nprocs() puts this
+	// struct on the stack, so an over-long write lands on its canary.
+	var st [112]byte
 	put := func(off int, v uint64) { binary.LittleEndian.PutUint64(st[off:], v) }
 	put(0, 1000)                               // uptime (s)
 	put(32, 4*1024*1024*1024)                  // totalram

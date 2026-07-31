@@ -64,6 +64,12 @@ func (m *memBE) HookInterrupt(emu.InterruptHookFunc) (emu.HookHandle, error) { r
 func (m *memBE) HookMemInvalid(func(emu.Backend, int, uint64, int, int64) bool) (emu.HookHandle, error) {
 	return nil, nil
 }
+func (m *memBE) HookMemRead(uint64, uint64, func(emu.Backend, uint64, int)) (emu.HookHandle, error) {
+	return nil, nil
+}
+func (m *memBE) HookMemWrite(uint64, uint64, func(emu.Backend, uint64, int, int64)) (emu.HookHandle, error) {
+	return nil, nil
+}
 
 // A real AArch64 shared object bundled with the repo (AOSP bionic), so the
 // linker is exercised against genuine RELATIVE/JUMP_SLOT/GLOB_DAT relocations
@@ -81,7 +87,7 @@ func TestLinkerAppliesRealSo(t *testing.T) {
 	be := newMemBE()
 	const base = uint64(0x12340000)
 	stub := uint64(0xee0000)
-	resolve := func(name string) (uint64, bool) { stub += 0x10; return stub, true }
+	resolve := func(name string, weak bool) (uint64, bool) { stub += 0x10; return stub, true }
 	if err := img.Apply(be, base, resolve); err != nil {
 		t.Fatal(err)
 	}

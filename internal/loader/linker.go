@@ -11,7 +11,10 @@ import (
 
 // Resolver maps an imported symbol name to a guest address (e.g. a bionic
 // export or an SVC trampoline). ok=false means unresolved.
-type Resolver func(name string) (addr uint64, ok bool)
+// weak reports whether this is a weak undefined reference; a resolver must
+// return ok=false for those unless it has a genuine definition, so the linker
+// can bind them to 0 as the ABI requires.
+type Resolver func(name string, weak bool) (addr uint64, ok bool)
 
 // Apply maps the image's PT_LOAD segments into the backend at `base` and
 // performs all dynamic relocations. After this the module's code/data is live
@@ -88,12 +91,24 @@ func (img *Image) symValue(sym uint32, base uint64, resolve Resolver) (uint64, e
 	}
 	s := img.Syms[sym]
 	if !s.Undef {
+		if s.Absolute {
+			return s.Value, nil // SHN_ABS: not relative to the load bias
+		}
 		return base + s.Value, nil
 	}
+	weak := s.Bind == elf.STB_WEAK
 	if resolve != nil {
-		if v, ok := resolve(s.Name); ok {
+		if v, ok := resolve(s.Name, weak); ok {
 			return v, nil
 		}
+	}
+	// An unresolved *weak* undefined symbol binds to 0 — that is the whole point
+	// of a weak reference, and the canonical `if (&sym) sym();` probe depends on
+	// it. Failing the link instead breaks libraries that legitimately reference
+	// optional libc (__cxa_thread_atexit_impl, getauxval) or the classic
+	// __gmon_start__ / _ITM_* stubs nothing ever defines.
+	if weak {
+		return 0, nil
 	}
 	return 0, fmt.Errorf("unresolved import %q", s.Name)
 }

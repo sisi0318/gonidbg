@@ -28,6 +28,10 @@ examples/dy-server/**
 
 config.json
 
+# RE scratch: emulator dumps, oracle probe output, raw instruction traces.
+# Everything here is regenerable output — no source lives under /scratch/.
+/scratch/
+
 *.txt
 *.bin
 *.log
