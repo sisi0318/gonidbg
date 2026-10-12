@@ -406,6 +406,21 @@ func (m *Memory) guestPage(kind int, addr uint64, size int, value int64) *page {
 	}
 }
 
+// hooksCoverPage reports whether any hook in hs can fire for an address on
+// page vpn. A page no hook watches may be cached in the TLB even while hooks
+// exist elsewhere, which is what keeps one narrow hook from putting every load
+// in the address space on the slow path.
+func hooksCoverPage(hs []*memHook, vpn uint64) bool {
+	lo := vpn << PageBits
+	hi := lo + PageSize - 1
+	for _, h := range hs {
+		if h.begin > h.end || (h.begin <= hi && h.end >= lo) {
+			return true
+		}
+	}
+	return false
+}
+
 func callMemHooks(hs []*memHook, addr uint64, size int, value int64) {
 	for _, h := range hs {
 		// begin > end means everywhere, matching unicorn's bound check
@@ -420,7 +435,7 @@ func (m *Memory) readSlow(addr uint64, size int) uint64 {
 	if off <= PageSize-uint64(size) {
 		vpn := addr >> PageBits
 		p := m.guestPage(MemRead, addr, size, 0)
-		if len(m.rhooks) != 0 {
+		if len(m.rhooks) != 0 && hooksCoverPage(m.rhooks, vpn) {
 			callMemHooks(m.rhooks, addr, size, 0)
 			// The hook runs arbitrary caller code. It may have written this
 			// page for the first time -- in which case the pointer resolved
@@ -428,6 +443,8 @@ func (m *Memory) readSlow(addr uint64, size int) uint64 {
 			// return a stale zero -- or unmapped or remapped it. Resolve again.
 			p = m.guestPage(MemRead, addr, size, 0)
 		} else {
+			// No hook watches this page, so later accesses to it may take the
+			// fast path without missing a callback.
 			m.rtlb[vpn&tlbMask] = tlbEntry{vpn, pageData(p)}
 		}
 		return loadN(pageData(p)[off:], size)
@@ -465,12 +482,13 @@ func (m *Memory) writeSlow(addr uint64, size int, v uint64) {
 	if off <= PageSize-uint64(size) {
 		vpn := addr >> PageBits
 		p := m.guestPage(MemWrite, addr, size, int64(v))
-		if len(m.whooks) != 0 {
+		hooked := len(m.whooks) != 0 && hooksCoverPage(m.whooks, vpn)
+		if hooked {
 			callMemHooks(m.whooks, addr, size, int64(v))
 			p = m.guestPage(MemWrite, addr, size, int64(v)) // the hook may have remapped it
 		}
 		data := m.writable(vpn, p)
-		if len(m.whooks) == 0 {
+		if !hooked {
 			m.wtlb[vpn&tlbMask] = tlbEntry{vpn, data}
 		}
 		storeN(data[off:], size, v)

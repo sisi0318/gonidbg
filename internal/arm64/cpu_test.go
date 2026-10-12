@@ -484,3 +484,43 @@ func TestRelease(t *testing.T) {
 		t.Error("a host read after Release should report unmapped memory")
 	}
 }
+
+// A page no hook watches is cached in the TLB even while hooks exist
+// elsewhere. The risk in that optimisation is caching a page a hook *does*
+// watch and then silently skipping the callback, so check both directions,
+// interleaved, and across a hook added after the page was already cached.
+func TestRangedMemoryHookFiresExactly(t *testing.T) {
+	// ldr x2,[x0] ; ldr x3,[x1]
+	c := newTest(t, 0xf9400002, 0xf9400023)
+	watched := uint64(tData + PageSize) // page the hook covers
+	plain := uint64(tData + 2*PageSize) // page it does not
+	c.SetX(0, watched)
+	c.SetX(1, plain)
+
+	// warm the TLB for both pages before any hook exists
+	c.Mem.Read64(watched)
+	c.Mem.Read64(plain)
+
+	var hits []uint64
+	rm := c.Mem.AddReadHook(watched, watched+0xff, func(addr uint64, size int, _ int64) {
+		hits = append(hits, addr)
+	})
+	for i := 0; i < 3; i++ {
+		c.PC = tCode
+		run(t, c, 2)
+	}
+	if len(hits) != 3 {
+		t.Fatalf("hook fired %d times, want 3 (one per load of the watched page)", len(hits))
+	}
+	for _, h := range hits {
+		if h != watched {
+			t.Errorf("hook saw %#x, want only %#x", h, watched)
+		}
+	}
+	rm()
+	c.PC = tCode
+	run(t, c, 2)
+	if len(hits) != 3 {
+		t.Errorf("hook fired %d times after removal, want 3", len(hits))
+	}
+}

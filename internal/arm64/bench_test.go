@@ -118,3 +118,22 @@ func BenchmarkMixed(b *testing.B) {
 		0xb4000041, // cbz x1,+8 (not taken)
 	)
 }
+
+// Loads on a page no hook watches must stay on the fast path even while hooks
+// exist elsewhere: one narrow hook used to push every load in the address
+// space onto the slow path.
+func BenchmarkLoadWithDistantHook(b *testing.B) {
+	benchRun(b, func(c *CPU) {
+		c.SetX(0, tData+0x800)
+		far := uint64(tData + 8*PageSize)
+		c.Mem.AddReadHook(far, far+0xff, func(uint64, int, int64) {})
+	}, 0xf9400002, 0xf9400403, 0xf9400804, 0xf9400c05)
+}
+
+// The same loads with a hook that does watch them, for comparison.
+func BenchmarkLoadWithCoveringHook(b *testing.B) {
+	benchRun(b, func(c *CPU) {
+		c.SetX(0, tData+0x800)
+		c.Mem.AddReadHook(0, ^uint64(0), func(uint64, int, int64) {})
+	}, 0xf9400002, 0xf9400403, 0xf9400804, 0xf9400c05)
+}
