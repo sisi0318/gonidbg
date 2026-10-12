@@ -8,7 +8,7 @@
 
 gonidbg 是 [unidbg](https://github.com/zhkl0228/unidbg) 的一个 Go 精简实现:在本机加载一个 Android AArch64 native 库(`.so`),不借助 JVM、真机或 Android 系统就能直接调用里面的函数。它给这个 `.so` 搭出一套够用的 Android 进程环境(动态链接器、真实的 bionic libc、一部分 Linux 系统调用、JNI/JavaVM),你就能从 Go 里调它的导出函数、读写它的内存。
 
-和 unidbg 一样,CPU 引擎可以替换,而且有一个**纯 Go 自带的解释器**:零外部依赖,`CGO_ENABLED=0 go build` 出来的单个二进制就能跑真实 AArch64 代码。另外两个可选引擎是 [Unicorn](https://www.unicorn-engine.org/) 和静态链接的 [dynarmic](https://github.com/lioncash/dynarmic) JIT。编译时决定打包哪些,运行时决定用哪个。
+和 unidbg 一样,CPU 引擎可以替换:内置一个纯 Go 的 AArch64 解释器,零外部依赖,`CGO_ENABLED=0 go build` 出来的单个二进制就能跑真实 AArch64 代码;另外可以接 [Unicorn](https://www.unicorn-engine.org/) 或静态链接的 [dynarmic](https://github.com/lioncash/dynarmic) JIT。编译时决定打包哪些,运行时决定用哪个。
 
 ```go
 e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so"})
@@ -16,7 +16,7 @@ defer e.Close()
 sum, _ := e.CallSymbol("add", 2, 3) // -> 5,作为真实 AArch64 代码执行
 ```
 
-> 当前状态:两个引擎都能完整跑通,具体包括加载并链接 bionic 和目标 `.so`、执行 `init_array` 与 `JNI_OnLoad`、调用导出函数、处理 syscall 与 JNI。它是 unidbg 的一个子集,缺哪些能力见 [对标 unidbg](#对标-unidbg)。
+> 当前状态:三个引擎都能完整跑通,具体包括加载并链接 bionic 和目标 `.so`、执行 `init_array` 与 `JNI_OnLoad`、调用导出函数、处理 syscall 与 JNI。它是 unidbg 的一个子集,缺哪些能力见 [对标 unidbg](#对标-unidbg)。
 
 ---
 
@@ -25,8 +25,8 @@ sum, _ := e.CallSymbol("add", 2, 3) // -> 5,作为真实 AArch64 代码执行
 unidbg 是模拟 Android native 库的事实标准,但它跑在 JVM 上,依赖也偏重。gonidbg 想用 Go 把最核心的那部分重新做一遍:
 
 - 不需要 JVM。编译产物就是单个 Go 二进制,启动快、占用低。
-- 引擎可换。自带的纯 Go 解释器(`interp`)不需要任何外部库;Unicorn 稳定,是装了之后的默认;dynarmic 是 JIT,热路径更快;编译期或运行期都能选,跟 unidbg 的 backend 思路一致。
-- **真正零依赖**。不装引擎也能用:`CGO_ENABLED=0 go build ./cmd/gonidbg` 就得到一个可以加载 `.so`、执行 native 代码的二进制,不需要 zig、不需要 `unicorn.dll`、不需要 C 工具链。
+- 零依赖也能用。`CGO_ENABLED=0 go build ./cmd/gonidbg` 就得到一个能加载 `.so`、执行 native 代码的二进制,不需要 zig、`unicorn.dll` 或任何 C 工具链。
+- 引擎可换。纯 Go 解释器(`interp`)随时可用;Unicorn 稳定,装了就是默认;dynarmic 是 JIT,热路径快得多。编译期或运行期都能选,跟 unidbg 的 backend 思路一致。
 - 复用真实 bionic。直接加载并模拟执行 AOSP sysroot 里的 `libc/libm/libdl`,省得自己重写一套 libc。
 - 代码量小。框架本体是几千行还算好读的 Go;CPU 这块是一个纯 Go 的 AArch64 解释器,外加两个很薄的外部引擎 shim。
 
@@ -37,43 +37,55 @@ unidbg 是模拟 Android native 库的事实标准,但它跑在 JVM 上,依赖�
 - Linux/AArch64 系统调用子集(mmap/mprotect/openat/read/write/clock_gettime/getrandom/futex/…),配一套小型虚拟文件系统(`/system/lib64`、`/proc/self/*`、属性、tzdata)。
 - JNI/JavaVM:guest 的 `JNIEnv`/`JavaVM` 调用会陷回到你用 Go 实现的处理器(`FindClass`、`GetMethodID`、`Call*Method*`、`RegisterNatives`、字符串、字节数组等)。
 - 按符号名或按模块偏移调用 native 函数,最多 8 个整型参数,可读取返回值。
-- 用 Go 回调替换 native 函数(`Replace`,入口 hook),或**内联 hook**(`HookAddr`,逐指令,Unicorn)改寄存器 / 重定向 PC;均自动让代码缓存失效。
-- 区间指令 hook 与内存访问 hook:`HookRange`、`HookMemRead`、`HookMemWrite`(Unicorn)。
+- 用 Go 回调替换 native 函数(`Replace`,入口 hook),或**内联 hook**(`HookAddr`,逐指令)改寄存器 / 重定向 PC;均自动让代码缓存失效。
+- 区间指令 hook 与内存访问 hook:`HookRange`、`HookMemRead`、`HookMemWrite`。
 - **快照 / 回滚**:`Snapshot` 在初始化后存一次,`Restore` 在每次复用调用前把 CPU、可写内存、brk 恢复到干净状态,适合池化的签名服务。
-- **控制台调试器**:断点 / 单步 / 寄存器 / 内存(Unicorn,I/O 可注入便于脚本化)。
+- **控制台调试器**:断点 / 单步 / 寄存器 / 内存(I/O 可注入便于脚本化)。
 - 从 **classes.dex 加载真实类/方法/字段元数据**(`Config.DexPath` / `LoadDex`):FindClass/GetMethodID/GetFieldID 按真实签名、父类解析(仅元数据,不执行字节码)。
 - 内存助手:分配、读写字节、C 字符串、小端整数。
-- 单指令 trace;以及完整指令流 trace(`TraceInsns`:每条指令的偏移 + 指令码 + 寄存器增量 + 调用/系统调用注解,Tenet 风格,可与真机 trace 对比;Unicorn)。
-- 引擎可选:**纯 Go 解释器始终可用**(无需构建标签),另外可加 `-tags unicorn`、`-tags dynarmic`,运行期用 `-engine` / `$GONIDBG_ENGINE` 选择。
-- 纯 Go 引擎的正确性由**差分测试**保证:逐条指令和 Unicorn 对比寄存器、向量寄存器与内存(`internal/emu/diff_test.go`)。
+- 单指令 trace;以及完整指令流 trace(`TraceInsns`:每条指令的偏移 + 指令码 + 寄存器增量 + 调用/系统调用注解,Tenet 风格,可与真机 trace 对比)。
+- 引擎可选:纯 Go 解释器无需构建标签,另外可加 `-tags unicorn`、`-tags dynarmic`,运行期用 `-engine` / `$GONIDBG_ENGINE` 选择。
+
+> `HookAddr` / `HookRange` / `HookMemRead` / `HookMemWrite`、完整指令 trace 和控制台调试器都依赖逐指令 hook,`interp` 和 Unicorn 支持,dynarmic 不支持(块 JIT);`Replace` 走的是 svc 跳板,三个引擎都能用。
 
 ## 快速开始
 
 ### 前置条件
 
-- Go 1.24+
-- [zig](https://ziglang.org/download/),需在 `PATH` 中,用作 cgo 的 C/C++ 交叉编译器,不需要 gcc 或 MSVC。
-- 一个 CPU 引擎(**可选** —— 纯 Go 的 `interp` 引擎永远编进去,什么都不装就能跑):
-  - Unicorn(默认):构建脚本会用 `pip install unicorn` 自动 vendoring。
-  - dynarmic(可选,更快):跑一次 `./build-dynarmic.sh` 完成 vendoring 和静态编译,详见 [BUILD.md](BUILD.md)。
+- Go 1.24+ —— 纯 Go 构建就只要这一条。
+
+想用 Unicorn 或 dynarmic 引擎,再加上:
+
+- [zig](https://ziglang.org/download/) 在 `PATH` 中,用作 cgo 的 C/C++ 交叉编译器,不需要 gcc 或 MSVC。
+- Unicorn:构建脚本会用 `pip install unicorn` 自动 vendoring。
+- dynarmic:跑一次 `./build-dynarmic.sh` 完成 vendoring 和静态编译,详见 [BUILD.md](BUILD.md)。
 
 ### 构建并运行示例
+
+纯 Go,什么都不用装:
+
+```bash
+go run ./cmd/gonidbg examples/native/native.so add 2 3   # add([2 3]) = 5
+go run ./cmd/gonidbg examples/native/native.so fib 20    # fib([20]) = 6765
+```
+
+要带上 Unicorn / dynarmic 引擎,用构建脚本(cgo 环境变量见 [BUILD.md](BUILD.md)):
 
 ```bash
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -File .\build.ps1            # -> bin\gonidbg.exe (unicorn)
-.\bin\gonidbg.exe examples\native\native.so add 2 3            # add([2 3]) = 5
+.\bin\gonidbg.exe examples\native\native.so add 2 3
 
 # Linux / macOS / git-bash
 ./build.sh
-./bin/gonidbg examples/native/native.so fib 20                  # fib([20]) = 6765
+./bin/gonidbg examples/native/native.so fib 20
 ```
 
 完整演示(加载内置 `native.so`,调用导出函数、一个被 import 的 `strlen`、一个写指针的函数,以及一个 Go `Replace` hook):
 
 ```bash
-go run -tags unicorn ./examples/run    # (cgo 环境变量见 BUILD.md;或直接用编好的二进制)
-# engine: unicorn
+go run ./examples/run        # 加 -tags unicorn / -tags dynarmic 可换引擎
+# engine: interp
 # add(2, 3)      = 5
 # fib(20)        = 6765
 # slen(...)      = 14
@@ -139,18 +151,18 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 | **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | ~13 ms/次 | GPLv2 |
 | **dynarmic** | `-tags dynarmic` | **静态链接**(C++ via zig) | ~2.1 ms/次 | 0BSD |
 
-- 引擎可以同时编进一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine interp …` 或 `GONIDBG_ENGINE=interp`。没有任何标签时只有 `interp`,它也是这时的默认;装了 Unicorn 则优先用 Unicorn(久经验证)。
-- 上表的"速度"是在一个真实的生产混淆 `.so` 上测的一次签名调用(约 290 万条指令,复用同一个模拟器,同一台机器上三个引擎实测)。纯 Go 解释器比 Unicorn **快约 27%**,而且**冷启动快一个数量级**(约 9 ms vs 120 ms),因为没有 JIT 预热、也不用加载动态库;dynarmic 仍然快 4.6 倍 —— 为什么解释器追不上它、以及追上需要付什么代价,测量结果都记在 [internal/arm64/PERF.md](internal/arm64/PERF.md) 里。基准测试见 `internal/arm64/bench_test.go`(`go test -run X -bench . ./internal/arm64`)。
-- 纯 Go 引擎还顺带解决了几个 cgo 带来的麻烦:不需要 Windows 上的专属引擎线程;写入代码页会自动让已解码的指令失效,所以自修改代码不需要手动刷缓存;逐指令 hook 只是普通 Go 调用,不用跨 cgo 边界 —— **完整指令 trace 因此快 16 倍**(同一次签名调用:interp 约 0.32 s,Unicorn 约 5.1 s;冷启动那次 5.1 s vs 90 s)。做逆向时这个差别很实在。
-- 许可证提示:Unicorn 是 GPLv2,静态链接它会让整个二进制都变成 GPLv2,所以 gonidbg 把它放在运行时 `dlopen` 的边界之后。dynarmic 是 0BSD(宽松许可),静态链接 dynarmic 不会带来 copyleft 牵连。纯 Go 的 `interp` 就是本仓库代码,Apache-2.0,没有任何 copyleft 牵连。dynarmic 的构建见 [BUILD.md](BUILD.md)。
+- 引擎可以同时编进一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine interp …` 或 `GONIDBG_ENGINE=interp`。没有任何标签时只有 `interp`,它也是这时的默认;装了 Unicorn 则优先用 Unicorn。
+- 表里的速度是同一台机器上三个引擎实测:一个真实的生产混淆 `.so` 的一次签名调用,约 290 万条指令,复用同一个模拟器。解释器的冷启动还快一个数量级(约 9 ms vs 120 ms),没有 JIT 预热也不用加载动态库;逐指令 hook 是普通 Go 调用而不跨 cgo 边界,完整指令 trace 因此比 Unicorn 快一个量级。
+- 为什么解释器追不上 dynarmic、追上要付什么代价,测量和结论都在 [internal/arm64/PERF.md](internal/arm64/PERF.md);基准测试是 `go test -run X -bench . ./internal/arm64`。
+- 纯 Go 引擎顺带少了两个 cgo 的麻烦:Windows 上不需要专属的引擎线程,写入代码页会自动让已解码的指令失效(自修改代码不用手动刷缓存)。
+- 许可证提示:Unicorn 是 GPLv2,静态链接它会让整个二进制都变成 GPLv2,所以 gonidbg 把它放在运行时 `dlopen` 的边界之后。dynarmic 是 0BSD(宽松许可),静态链接不会带来 copyleft 牵连。纯 Go 的 `interp` 就是本仓库代码(Apache-2.0),同样没有牵连。dynarmic 的构建见 [BUILD.md](BUILD.md)。
 
-### 纯 Go 引擎怎么验证的
+### 正确性怎么保证
 
-一个自己写的 CPU 最大的风险是"算错了但不报错"。所以 `interp` 是对着 Unicorn 逐条校准出来的:
+自己写一个 CPU,最大的风险是"算错了但不报错",所以 `interp` 是对着 Unicorn 校准的:
 
-- **差分测试**(`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`):随机取指令编码,在两个引擎上从同一份随机初始状态执行**一条**指令,然后比对 34 个通用寄存器、全部 32 个向量寄存器和被访问的内存页。向量寄存器不需要额外的后端 API —— 用一段前导代码把 V0..V31 从内存装进来、用一段尾随代码再写回去,整个寄存器文件就都经由内存可见了。目前随机采样 300 万条以上指令零差异。
-- **真实负载**:对那个生产 `.so` 做完整签名,X-Argus / X-Gorgon / X-Ladon 等 8 个签名头与 Unicorn **逐字节一致**;静态统计也确认它执行到的 5100 万条指令(39891 种不同编码)全部被解码器覆盖。
-- 差分测试只能验证"我接受的指令算得对不对",没法发现"我漏了哪条指令"——后者是靠真实负载和那份编码统计兜住的。
+- 差分测试:随机取指令编码,两个引擎从同一份随机初始状态各执行一条,再比对全部通用寄存器、32 个向量寄存器和被访问的内存(`internal/emu/diff_test.go`,目前累计 300 万条以上零差异)。
+- 真实负载:那个生产 `.so` 的 8 个签名头与 Unicorn 逐字节一致;另有统计确认它执行到的 5100 万条指令(39891 种编码)全部被解码器覆盖 —— 差分测试只能验证"接受的指令算得对",漏掉的指令要靠这个兜住。
 
 ## 工作原理
 
@@ -190,7 +202,7 @@ gonidbg/
 
 ## 对标 unidbg
 
-已实现:AArch64 ELF 加载与动态链接 · 复用真实 bionic · **自带纯 Go AArch64 解释器**(零依赖)+ 可选 Unicorn / dynarmic 后端 · Linux syscall 子集(含 uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity 等)· 带 Go 处理器的 JNI/JavaVM(字符串、字节/对象数组、异常、更多 Call 变体)· 按名或按偏移调用 · 函数 `Replace` 与**内联 hook** · **控制台调试器**(断点/单步/寄存器/内存)· 从 **classes.dex 加载真实类/方法/字段元数据** · 内存助手 · 指令 trace。
+已实现:AArch64 ELF 加载与动态链接 · 复用真实 bionic · 内置纯 Go AArch64 解释器(零依赖)+ 可选 Unicorn / dynarmic 后端 · Linux syscall 子集(含 uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity 等)· 带 Go 处理器的 JNI/JavaVM(字符串、字节/对象数组、异常、更多 Call 变体)· 按名或按偏移调用 · 函数 `Replace` 与**内联 hook** · **控制台调试器**(断点/单步/寄存器/内存)· 从 **classes.dex 加载真实类/方法/字段元数据** · 内存助手 · 指令 trace。
 
 还没做的(路线图,欢迎 PR):
 
@@ -198,7 +210,7 @@ gonidbg/
 - JNI / syscall 仍是子集:覆盖常见用法,但不是全部 ~232 个 JNI 槽位 / 完整 syscall 表。
 - DEX 是**元数据级**:解析类/方法/字段(签名、父类)供 FindClass/GetMethodID/GetFieldID 解析,但**不执行 DEX 字节码**(无 JVM);Java 侧行为仍由你用 `dvm.Jni` 建模。
 - 内联 hook 与控制台调试器需逐指令 hook,`interp` 和 Unicorn 都支持,dynarmic 不支持(块 JIT)。
-- 纯 Go 解释器按 Unicorn 所模拟的那颗 CPU 对齐:没有 FEAT_FP16(半精度算术)、FEAT_LSE(CAS/SWP/LDADD 等)、指针认证和 SVE。遇到这些会明确报"未实现指令"而不是算错。
+- 纯 Go 解释器对齐 Unicorn 所模拟的那颗 CPU:没有 FEAT_FP16(半精度算术)、FEAT_LSE(CAS/SWP/LDADD)、指针认证和 SVE,遇到会明确报"未实现指令"而不是算错。
 - 真并发线程(已有单核协作式调度器:`pthread_create` 建 fiber、按时间片切换、在 futex/sleep 处保存并恢复 CPU 上下文 —— 但非真并发)、信号、iOS / Mach-O。
 
 ## 从源码构建 / 引擎
