@@ -137,3 +137,19 @@ func BenchmarkLoadWithCoveringHook(b *testing.B) {
 		c.Mem.AddReadHook(0, ^uint64(0), func(uint64, int, int64) {})
 	}, 0xf9400002, 0xf9400403, 0xf9400804, 0xf9400c05)
 }
+
+// BenchmarkDispatchFloor is the cost of the run loop itself: NOP decodes to a
+// handler that only advances PC, so this is the PC and alignment test, the
+// fetch-cache test, the hook test, the array index, the nil test, the indirect
+// call and the retire counter — everything a faster execution strategy would
+// have to remove. The difference between this and a real kernel is the part
+// that is actual work.
+func BenchmarkDispatchFloor(b *testing.B) {
+	benchRun(b, nil, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f) // nop x4
+}
+
+// A single register-to-register move: the cheapest instruction that does
+// something, for comparison against the floor.
+func BenchmarkMovReg(b *testing.B) {
+	benchRun(b, nil, 0xaa0003e1, 0xaa0103e2, 0xaa0203e3, 0xaa0303e4)
+}
