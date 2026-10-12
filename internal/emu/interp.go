@@ -75,14 +75,7 @@ func (b *interpBackend) RegWrite(r Reg, val uint64) error {
 }
 
 func (b *interpBackend) ReadGPRegs() ([34]uint64, error) {
-	var out [34]uint64
-	for i := 0; i < 31; i++ {
-		out[i] = b.c.X(i)
-	}
-	out[31] = b.c.SP()
-	out[32] = b.c.PC
-	out[33] = uint64(b.c.NZCV)
-	return out, nil
+	return b.c.ReadGPRegs(), nil
 }
 
 func (b *interpBackend) MemMap(addr, size uint64, prot int) error {

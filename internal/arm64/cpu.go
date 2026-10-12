@@ -143,7 +143,20 @@ func (c *CPU) SetX(n int, v uint64) {
 	c.R[n&31] = v
 }
 
-func (c *CPU) SP() uint64        { return c.R[rSP] }
+func (c *CPU) SP() uint64 { return c.R[rSP] }
+
+// ReadGPRegs returns the whole general-purpose file in one go:
+// [0..30] = x0..x30, [31] = sp, [32] = pc, [33] = nzcv. The instruction tracer
+// calls this once per instruction, so it copies the register block rather than
+// reading 34 registers one at a time.
+func (c *CPU) ReadGPRegs() [34]uint64 {
+	var out [34]uint64
+	copy(out[:31], c.R[:31])
+	out[31] = c.R[rSP]
+	out[32] = c.PC
+	out[33] = uint64(c.NZCV)
+	return out
+}
 func (c *CPU) SetSP(v uint64)    { c.R[rSP] = v }
 func (c *CPU) InsnCount() uint64 { return c.icount }
 
