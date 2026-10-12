@@ -1,13 +1,29 @@
 # 构建说明(含 CPU 引擎)
 
-本项目分两层:**纯 Go 层**(loader/memory/kernel/dvm/vfs/emulator,无 cgo)和 **CPU 引擎层**(`internal/emu`,cgo)。引擎可选,像原版 unidbg 一样在构建期选编译哪些、运行期选用哪个:
+本项目分两层:**纯 Go 层**(loader/memory/kernel/dvm/vfs/emulator/arm64,无 cgo)和**外部 CPU 引擎层**(`internal/emu` 里的 cgo shim)。引擎可选,像原版 unidbg 一样在构建期选编译哪些、运行期选用哪个:
 
 | 引擎 | 构建标签 | 形态 | 说明 |
 |---|---|---|---|
-| **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | 解释执行,成熟稳定,默认 |
-| **dynarmic** | `-tags dynarmic` | **静态链接**(C++,经 zig) | JIT,更快;见下方 [dynarmic 引擎](#dynarmic-引擎静态链接) |
+| **interp** | 无,始终编入 | 纯 Go(`internal/arm64`) | 自带 AArch64 解释器,零外部依赖;不装任何引擎时的默认 |
+| **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | 解释执行,久经验证;装了之后是默认 |
+| **dynarmic** | `-tags dynarmic` | **静态链接**(C++,经 zig) | JIT,最快;见下方 [dynarmic 引擎](#dynarmic-引擎静态链接) |
 
-两个都编进去:`-tags "unicorn dynarmic"`,运行期用 `-engine unicorn|dynarmic`(或环境变量 `GONIDBG_ENGINE`)选择;`gonidbg -engine ...` 会打印当前引擎。不带任何引擎标签则是纯 Go 构建(可编译/单测,但创建模拟器会返回"无引擎"错误)。
+都编进去:`-tags "unicorn dynarmic"`,运行期用 `-engine interp|unicorn|dynarmic`(或环境变量 `GONIDBG_ENGINE`)选择;`gonidbg -engine ...` 会打印当前引擎。
+
+**不带任何引擎标签也是一个可用的模拟器**(走纯 Go 的 `interp`),这是和早期版本最大的区别 —— 以前纯 Go 构建只能编译和跑单测,创建模拟器会返回"无引擎"错误:
+
+```bash
+CGO_ENABLED=0 go build ./...                                   # 不需要 zig / gcc / unicorn
+CGO_ENABLED=0 go run ./cmd/gonidbg examples/native/native.so add 2 3
+CGO_ENABLED=0 go test ./...                                    # 含 interp 的端到端测试
+```
+
+纯 Go 引擎是对着 Unicorn 逐条指令校准的,差分测试在 `internal/emu/diff_test.go`:
+
+```bash
+go test -tags unicorn -run TestDiffUnicorn ./internal/emu      # 默认 2 万条
+GONIDBG_DIFF_N=1000000 GONIDBG_DIFF_SEED=7   go test -tags unicorn -timeout 2h -run TestDiffUnicorn ./internal/emu
+```
 
 ## 0. 一次性准备 Unicorn(本机已完成,换机器需重做)
 

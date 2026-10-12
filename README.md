@@ -8,7 +8,7 @@
 
 gonidbg 是 [unidbg](https://github.com/zhkl0228/unidbg) 的一个 Go 精简实现:在本机加载一个 Android AArch64 native 库(`.so`),不借助 JVM、真机或 Android 系统就能直接调用里面的函数。它给这个 `.so` 搭出一套够用的 Android 进程环境(动态链接器、真实的 bionic libc、一部分 Linux 系统调用、JNI/JavaVM),你就能从 Go 里调它的导出函数、读写它的内存。
 
-和 unidbg 一样,CPU 引擎可以替换:[Unicorn](https://www.unicorn-engine.org/) 解释器,或静态链接的 [dynarmic](https://github.com/lioncash/dynarmic) JIT。编译时决定打包哪个,运行时决定用哪个。
+和 unidbg 一样,CPU 引擎可以替换,而且有一个**纯 Go 自带的解释器**:零外部依赖,`CGO_ENABLED=0 go build` 出来的单个二进制就能跑真实 AArch64 代码。另外两个可选引擎是 [Unicorn](https://www.unicorn-engine.org/) 和静态链接的 [dynarmic](https://github.com/lioncash/dynarmic) JIT。编译时决定打包哪些,运行时决定用哪个。
 
 ```go
 e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so"})
@@ -25,9 +25,10 @@ sum, _ := e.CallSymbol("add", 2, 3) // -> 5,作为真实 AArch64 代码执行
 unidbg 是模拟 Android native 库的事实标准,但它跑在 JVM 上,依赖也偏重。gonidbg 想用 Go 把最核心的那部分重新做一遍:
 
 - 不需要 JVM。编译产物就是单个 Go 二进制,启动快、占用低。
-- 引擎可换。Unicorn 稳定,作为默认;dynarmic 是 JIT,热路径上快 5–9 倍;编译期或运行期都能选,跟 unidbg 的 backend 思路一致。
+- 引擎可换。自带的纯 Go 解释器(`interp`)不需要任何外部库;Unicorn 稳定,是装了之后的默认;dynarmic 是 JIT,热路径更快;编译期或运行期都能选,跟 unidbg 的 backend 思路一致。
+- **真正零依赖**。不装引擎也能用:`CGO_ENABLED=0 go build ./cmd/gonidbg` 就得到一个可以加载 `.so`、执行 native 代码的二进制,不需要 zig、不需要 `unicorn.dll`、不需要 C 工具链。
 - 复用真实 bionic。直接加载并模拟执行 AOSP sysroot 里的 `libc/libm/libdl`,省得自己重写一套 libc。
-- 代码量小。框架本体是几千行还算好读的 Go,外加两个很薄的 CPU 引擎 shim。
+- 代码量小。框架本体是几千行还算好读的 Go;CPU 这块是一个纯 Go 的 AArch64 解释器,外加两个很薄的外部引擎 shim。
 
 ## 特性
 
@@ -43,7 +44,8 @@ unidbg 是模拟 Android native 库的事实标准,但它跑在 JVM 上,依赖�
 - 从 **classes.dex 加载真实类/方法/字段元数据**(`Config.DexPath` / `LoadDex`):FindClass/GetMethodID/GetFieldID 按真实签名、父类解析(仅元数据,不执行字节码)。
 - 内存助手:分配、读写字节、C 字符串、小端整数。
 - 单指令 trace;以及完整指令流 trace(`TraceInsns`:每条指令的偏移 + 指令码 + 寄存器增量 + 调用/系统调用注解,Tenet 风格,可与真机 trace 对比;Unicorn)。
-- 引擎可选:`-tags unicorn`、`-tags dynarmic`,或两个都编进去,运行期用 `-engine` / `$GONIDBG_ENGINE` 选择。
+- 引擎可选:**纯 Go 解释器始终可用**(无需构建标签),另外可加 `-tags unicorn`、`-tags dynarmic`,运行期用 `-engine` / `$GONIDBG_ENGINE` 选择。
+- 纯 Go 引擎的正确性由**差分测试**保证:逐条指令和 Unicorn 对比寄存器、向量寄存器与内存(`internal/emu/diff_test.go`)。
 
 ## 快速开始
 
@@ -51,7 +53,7 @@ unidbg 是模拟 Android native 库的事实标准,但它跑在 JVM 上,依赖�
 
 - Go 1.24+
 - [zig](https://ziglang.org/download/),需在 `PATH` 中,用作 cgo 的 C/C++ 交叉编译器,不需要 gcc 或 MSVC。
-- 一个 CPU 引擎:
+- 一个 CPU 引擎(**可选** —— 纯 Go 的 `interp` 引擎永远编进去,什么都不装就能跑):
   - Unicorn(默认):构建脚本会用 `pip install unicorn` 自动 vendoring。
   - dynarmic(可选,更快):跑一次 `./build-dynarmic.sh` 完成 vendoring 和静态编译,详见 [BUILD.md](BUILD.md)。
 
@@ -87,7 +89,7 @@ import "github.com/sisi0318/gonidbg/emulator"
 e, err := emulator.New(emulator.Config{
     SOPath:    "libfoo.so",        // 启动时加载并跑 init_array + JNI_OnLoad
     AssetRoot: emulator.Locate("assets"),
-    Engine:    "",                 // "unicorn" | "dynarmic" | "" = 自动
+    Engine:    "",                 // "interp" | "unicorn" | "dynarmic" | "" = 自动
 })
 if err != nil { panic(err) }
 defer e.Close()
@@ -133,12 +135,22 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 
 | 引擎 | 构建标签 | 链接方式 | 速度(热路径) | 许可证 |
 |---|---|---|---|---|
-| **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | ~20 ms/次 | GPLv2 |
+| **interp**(纯 Go) | 无,始终可用 | **无依赖**(纯 Go,无 cgo) | ~13 ms/次 | Apache-2.0 |
+| **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | ~13 ms/次 | GPLv2 |
 | **dynarmic** | `-tags dynarmic` | **静态链接**(C++ via zig) | ~2–4 ms/次 | 0BSD |
 
-- 两个引擎可以编进同一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine dynarmic …` 或 `GONIDBG_ENGINE=dynarmic`。
-- 每个模拟器第一次调用要花几百毫秒(dynarmic 现编 JIT,Unicorn 预热),之后复用同一个模拟器就很快了。
-- 许可证提示:Unicorn 是 GPLv2,静态链接它会让整个二进制都变成 GPLv2,所以 gonidbg 把它放在运行时 `dlopen` 的边界之后。dynarmic 是 0BSD(宽松许可),静态链接 dynarmic 不会带来 copyleft 牵连。dynarmic 的构建见 [BUILD.md](BUILD.md)。
+- 引擎可以同时编进一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine interp …` 或 `GONIDBG_ENGINE=interp`。没有任何标签时只有 `interp`,它也是这时的默认;装了 Unicorn 则优先用 Unicorn(久经验证)。
+- 上表的"速度"是在一个真实的生产混淆 `.so` 上测的一次签名调用(约 290 万条指令,复用同一个模拟器)。纯 Go 解释器和 Unicorn 基本同速,而且**冷启动快一个数量级**(约 9 ms vs 144 ms),因为没有 JIT 预热、也不用加载动态库。
+- 纯 Go 引擎还顺带解决了几个 cgo 带来的麻烦:不需要 Windows 上的专属引擎线程,逐指令 hook 和 trace 只是普通 Go 函数调用(很便宜),写入代码页会自动让已解码的指令失效,所以自修改代码不需要手动刷缓存。
+- 许可证提示:Unicorn 是 GPLv2,静态链接它会让整个二进制都变成 GPLv2,所以 gonidbg 把它放在运行时 `dlopen` 的边界之后。dynarmic 是 0BSD(宽松许可),静态链接 dynarmic 不会带来 copyleft 牵连。纯 Go 的 `interp` 就是本仓库代码,Apache-2.0,没有任何 copyleft 牵连。dynarmic 的构建见 [BUILD.md](BUILD.md)。
+
+### 纯 Go 引擎怎么验证的
+
+一个自己写的 CPU 最大的风险是"算错了但不报错"。所以 `interp` 是对着 Unicorn 逐条校准出来的:
+
+- **差分测试**(`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`):随机取指令编码,在两个引擎上从同一份随机初始状态执行**一条**指令,然后比对 34 个通用寄存器、全部 32 个向量寄存器和被访问的内存页。向量寄存器不需要额外的后端 API —— 用一段前导代码把 V0..V31 从内存装进来、用一段尾随代码再写回去,整个寄存器文件就都经由内存可见了。目前随机采样 150 万条指令零差异。
+- **真实负载**:对那个生产 `.so` 做完整签名,X-Argus / X-Gorgon / X-Ladon 等 8 个签名头与 Unicorn **逐字节一致**;静态统计也确认它执行到的 5100 万条指令(39891 种不同编码)全部被解码器覆盖。
+- 差分测试只能验证"我接受的指令算得对不对",没法发现"我漏了哪条指令"——后者是靠真实负载和那份编码统计兜住的。
 
 ## 工作原理
 
@@ -149,7 +161,7 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 3. 初始化:跑 `DT_INIT` 和 `init_array`,如果导出了 `JNI_OnLoad` 也一并调用(传入合成的 `JavaVM`)。
 4. 调用:`CallSymbol`/`CallOffset` 把参数写进 `X0..X7`,把 `LR` 设成哨兵地址,然后一直跑到返回。SVC 陷入之后再分派给 syscall 层(`internal/kernel`)、JNI 层,或某个用 Go 实现的 libc 函数、被 Replace 的函数。
 
-guest 的内存和寄存器通过 `Backend` 接口交换,两个引擎 shim 都实现了这个接口。dynarmic 后端给 JIT 提供了一张直接访存的页表,生成的代码可以直接读写宿主内存,只有遇到 SVC 才陷回 Go。
+guest 的内存和寄存器通过 `Backend` 接口交换,三个引擎都实现了这个接口。纯 Go 的 `interp` 用一张三级页表管理 guest 地址空间(前面挂了小的直接映射 TLB),每个可执行页第一次执行时把指令解码进一个数组,之后热循环就是"取已解码指令 + 间接调用"。dynarmic 后端给 JIT 提供了一张直接访存的页表,生成的代码可以直接读写宿主内存,只有遇到 SVC 才陷回 Go。
 
 ### 目录结构
 
@@ -158,7 +170,8 @@ gonidbg/
 ├── emulator/     公开 API:New、LoadLibrary、CallSymbol/CallOffset、Replace、内存助手
 ├── dvm/          公开:假 Dalvik VM —— VM、Object、Class、Jni、AbstractJni、VaList
 ├── internal/
-│   ├── emu/      CPU 后端接口 + 注册表;unicorn(cgo)与 dynarmic(cgo/C++)shim
+│   ├── arm64/    纯 Go 的 AArch64 解释器(CPU + 分页内存,无 cgo)
+│   ├── emu/      CPU 后端接口 + 注册表;interp(纯 Go)、unicorn(cgo)、dynarmic(cgo/C++)
 │   ├── loader/   ELF 解析 + 动态链接器
 │   ├── kernel/   AArch64 Linux 系统调用子集
 │   ├── memory/   guest 地址空间分配器
@@ -177,14 +190,15 @@ gonidbg/
 
 ## 对标 unidbg
 
-已实现:AArch64 ELF 加载与动态链接 · 复用真实 bionic · 可选 Unicorn / dynarmic 后端 · Linux syscall 子集(含 uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity 等)· 带 Go 处理器的 JNI/JavaVM(字符串、字节/对象数组、异常、更多 Call 变体)· 按名或按偏移调用 · 函数 `Replace` 与**内联 hook** · **控制台调试器**(断点/单步/寄存器/内存)· 从 **classes.dex 加载真实类/方法/字段元数据** · 内存助手 · 指令 trace。
+已实现:AArch64 ELF 加载与动态链接 · 复用真实 bionic · **自带纯 Go AArch64 解释器**(零依赖)+ 可选 Unicorn / dynarmic 后端 · Linux syscall 子集(含 uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity 等)· 带 Go 处理器的 JNI/JavaVM(字符串、字节/对象数组、异常、更多 Call 变体)· 按名或按偏移调用 · 函数 `Replace` 与**内联 hook** · **控制台调试器**(断点/单步/寄存器/内存)· 从 **classes.dex 加载真实类/方法/字段元数据** · 内存助手 · 指令 trace。
 
 还没做的(路线图,欢迎 PR):
 
 - ARM32,目前只支持 AArch64。
 - JNI / syscall 仍是子集:覆盖常见用法,但不是全部 ~232 个 JNI 槽位 / 完整 syscall 表。
 - DEX 是**元数据级**:解析类/方法/字段(签名、父类)供 FindClass/GetMethodID/GetFieldID 解析,但**不执行 DEX 字节码**(无 JVM);Java 侧行为仍由你用 `dvm.Jni` 建模。
-- 内联 hook 与控制台调试器需 Unicorn 引擎(dynarmic 是块 JIT,无逐指令 hook)。
+- 内联 hook 与控制台调试器需逐指令 hook,`interp` 和 Unicorn 都支持,dynarmic 不支持(块 JIT)。
+- 纯 Go 解释器按 Unicorn 所模拟的那颗 CPU 对齐:没有 FEAT_FP16(半精度算术)、FEAT_LSE(CAS/SWP/LDADD 等)、指针认证和 SVE。遇到这些会明确报"未实现指令"而不是算错。
 - 真并发线程(已有单核协作式调度器:`pthread_create` 建 fiber、按时间片切换、在 futex/sleep 处保存并恢复 CPU 上下文 —— 但非真并发)、信号、iOS / Mach-O。
 
 ## 从源码构建 / 引擎
@@ -192,19 +206,24 @@ gonidbg/
 完整的工具链(用 zig 当 C/C++ 编译器)、纯 Go 层与引擎层、静态 dynarmic 构建(`build-dynarmic.sh`)以及 Windows/Linux 说明,都在 [BUILD.md](BUILD.md) 里。
 
 ```bash
-# 纯 Go 层随处可 build/test(无引擎、无 cgo):
+# 纯 Go:build/test 随处可跑,而且这时已经是一个能用的模拟器(interp 引擎):
 CGO_ENABLED=0 go build ./...
 CGO_ENABLED=0 go test ./...
+CGO_ENABLED=0 go run ./cmd/gonidbg examples/native/native.so add 2 3   # -> 5
 
-# 引擎集成测试(加载内置 native.so 并运行):
+# 外部引擎的集成测试(加载内置 native.so 并运行):
 go test -tags unicorn  ./emulator
 go test -tags dynarmic ./emulator
+
+# 纯 Go 引擎 vs Unicorn 的逐条指令差分测试(默认 2 万条,可调):
+go test -tags unicorn -run TestDiffUnicorn ./internal/emu
+GONIDBG_DIFF_N=1000000 GONIDBG_DIFF_SEED=7 go test -tags unicorn -timeout 2h -run TestDiffUnicorn ./internal/emu
 ```
 
 ## 致谢与许可证
 
 - [unidbg](https://github.com/zhkl0228/unidbg)(Apache-2.0):本项目重新实现的对象。
-- [Unicorn Engine](https://github.com/unicorn-engine/unicorn)(GPLv2):默认 CPU 后端,运行时加载。
+- [Unicorn Engine](https://github.com/unicorn-engine/unicorn)(GPLv2):可选 CPU 后端(运行时加载),也是纯 Go 解释器的校准基准。
 - [dynarmic](https://github.com/lioncash/dynarmic)(0BSD):可选的 JIT CPU 后端。
 - AOSP bionic(Apache-2.0)等:`assets/` 下内置的 sysroot,见 [NOTICE](NOTICE)。
 

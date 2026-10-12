@@ -1,5 +1,3 @@
-//go:build unicorn || dynarmic
-
 package main
 
 import (

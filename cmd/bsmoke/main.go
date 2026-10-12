@@ -1,5 +1,3 @@
-//go:build unicorn || dynarmic
-
 // bsmoke: exercises the real emu.Backend end-to-end on whichever engine is
 // compiled in (unicorn or dynarmic; pick with -engine / $GONIDBG_ENGINE).
 // Guest program: `svc #0 ; add x0,x0,#1`. The interrupt hook (a Go callback)

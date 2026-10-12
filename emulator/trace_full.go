@@ -57,10 +57,11 @@ type insnTracer struct {
 // TraceInsns installs a full instruction tracer over [start, end) and writes the
 // trace to w. base is subtracted from each PC so the trace uses module-relative
 // offsets (pass the module base). Returns a stop function that removes the hook
-// and flushes; call it after the traced call returns. Unicorn only.
+// and flushes; call it after the traced call returns. Needs an engine with
+// per-instruction code hooks (unicorn or interp).
 func (e *Emulator) TraceInsns(w io.Writer, start, end, base uint64) (func(), error) {
-	if e.engine != "unicorn" {
-		return nil, fmt.Errorf("TraceInsns: full instruction trace requires the unicorn engine (current %q)", e.engine)
+	if !emu.HasCodeHooks(e.be) {
+		return nil, fmt.Errorf("TraceInsns: full instruction trace needs an engine with per-instruction hooks (current %q)", e.engine)
 	}
 	t := &insnTracer{e: e, w: bufio.NewWriterSize(w, 1<<20), base: base, buf: make([]byte, 0, 256)}
 	fmt.Fprintf(t.w, "# gonidbg instruction trace  base=0x%x range=[0x%x,0x%x)\n", base, start, end)

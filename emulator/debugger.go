@@ -35,8 +35,8 @@ type Debugger struct {
 
 // NewDebugger attaches a debugger (installs the per-instruction hook).
 func (e *Emulator) NewDebugger() (*Debugger, error) {
-	if e.engine != "unicorn" {
-		return nil, fmt.Errorf("debugger requires the unicorn engine (current %q)", e.engine)
+	if !emu.HasCodeHooks(e.be) {
+		return nil, fmt.Errorf("debugger needs an engine with per-instruction hooks (current %q)", e.engine)
 	}
 	d := &Debugger{e: e, bps: map[uint64]bool{}, In: os.Stdin, Out: os.Stdout}
 	h, err := e.be.HookCode(1, 0, func(b emu.Backend, addr uint64, size uint32) { // begin>end => global

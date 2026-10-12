@@ -1,5 +1,3 @@
-//go:build unicorn || dynarmic
-
 // Real-world example: drive a production, obfuscated Android native library
 // (com.bytedance...metasec "MS") through gonidbg's general API to reproduce the
 // X-* request signature headers — the original motivating use case, rebuilt on

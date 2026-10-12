@@ -159,6 +159,22 @@ const MaxMemReadLen = 256 << 20
 // HookHandle lets a hook be removed.
 type HookHandle interface{ Remove() error }
 
+// CodeHookCapable is implemented by backends whose HookCode really delivers a
+// callback per instruction. A backend that does not implement it still accepts
+// HookCode, but never calls back: dynarmic is a block JIT with no
+// per-instruction hook, so it returns a no-op handle rather than failing.
+// Features built on code hooks (inline hooks, the tracer, the debugger) must
+// gate on HasCodeHooks instead of assuming they work.
+type CodeHookCapable interface {
+	CodeHooksSupported() bool
+}
+
+// HasCodeHooks reports whether b delivers per-instruction code hooks.
+func HasCodeHooks(b Backend) bool {
+	ch, ok := b.(CodeHookCapable)
+	return ok && ch.CodeHooksSupported()
+}
+
 // CPUContext is an opaque, backend-specific snapshot of the full guest CPU
 // register file (see Backend.SaveContext). Free releases it.
 type CPUContext interface{ Free() error }

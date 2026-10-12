@@ -45,9 +45,12 @@ func Available() []string { return append([]string(nil), regOrder...) }
 
 // defaultPreference is the order tried when no engine is requested explicitly.
 // Unicorn is the proven default (produces verified signatures); dynarmic is
-// opt-in here — faster, but newer in this port. If only one is compiled in,
-// that one wins regardless of this order.
-var defaultPreference = []string{"unicorn", "dynarmic"}
+// opt-in here — faster, but newer in this port. "interp" is the pure-Go
+// interpreter: always compiled in, so it is the fallback that makes a
+// dependency-free build work, but it is tried last because the two native
+// engines are faster. If only one is compiled in, that one wins regardless of
+// this order.
+var defaultPreference = []string{"unicorn", "dynarmic", "interp"}
 
 // New returns the default backend (NewNamed with an empty name).
 func New() (Backend, error) { return NewNamed("") }

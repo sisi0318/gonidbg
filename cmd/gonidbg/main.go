@@ -1,5 +1,3 @@
-//go:build unicorn || dynarmic
-
 // gonidbg: load an AArch64 Android .so and call one of its exported functions
 // with integer arguments — a small driver over the emulator API.
 //

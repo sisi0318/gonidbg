@@ -20,8 +20,12 @@ jobs:
         run: CGO_ENABLED=0 go build ./...
       - name: Vet (pure Go)
         run: CGO_ENABLED=0 go vet ./...
-      - name: Test (pure Go — linker vs bundled bionic, memory allocator)
+      - name: Test (pure Go — includes the interp engine end to end)
         run: CGO_ENABLED=0 go test ./...
+      - name: Run a .so with no engine installed (pure-Go interp backend)
+        run: |
+          CGO_ENABLED=0 go run ./cmd/gonidbg examples/native/native.so add 2 3 | tee /tmp/out
+          grep -q 'add(\[2 3\]) = 5' /tmp/out
 
   # Engine layer: run the integration test on the Unicorn backend. libunicorn 2.x
   # comes from apt (headers in /usr/include, libunicorn.so.2 on the default search
@@ -39,3 +43,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libunicorn-dev
       - name: Test with the Unicorn engine
         run: CGO_ENABLED=1 go test -tags unicorn ./...
+      # The pure-Go interpreter is only trustworthy because it is diffed against
+      # Unicorn instruction by instruction; this is that test at a CI-sized
+      # sample (raise GONIDBG_DIFF_N locally for a deep run).
+      - name: Differential test (interp vs unicorn)
+        run: CGO_ENABLED=1 GONIDBG_DIFF_N=50000 go test -tags unicorn -run TestDiffUnicorn ./internal/emu

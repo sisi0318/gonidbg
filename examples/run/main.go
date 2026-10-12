@@ -1,5 +1,3 @@
-//go:build unicorn || dynarmic
-
 // Example: load the bundled native.so and call its exported functions through
 // gonidbg. Build with an engine and run from the repo root:
 //

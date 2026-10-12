@@ -8,7 +8,7 @@
 
 gonidbg is a small Go reimplementation of [unidbg](https://github.com/zhkl0228/unidbg): it loads an Android AArch64 native library (`.so`) and calls its functions on your host machine, without a JVM, a device, or Android. It sets up just enough of an Android process around the `.so` (a dynamic linker, real bionic libc, a subset of Linux syscalls, and a JNI/JavaVM) so you can call the library's exports from Go and read and write its memory.
 
-Like unidbg, the CPU engine is swappable: a [Unicorn](https://www.unicorn-engine.org/) interpreter, or a statically linked [dynarmic](https://github.com/lioncash/dynarmic) JIT. You decide which one to compile in, and which one to use at runtime.
+Like unidbg, the CPU engine is swappable — and one of them is a **pure-Go AArch64 interpreter built in**, so `CGO_ENABLED=0 go build` gives you a single binary with no external dependencies that still executes real AArch64 code. The two optional engines are [Unicorn](https://www.unicorn-engine.org/) and a statically linked [dynarmic](https://github.com/lioncash/dynarmic) JIT. You decide which ones to compile in, and which one to use at runtime.
 
 ```go
 e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so"})
@@ -16,7 +16,7 @@ defer e.Close()
 sum, _ := e.CallSymbol("add", 2, 3) // -> 5, executed as real AArch64 code
 ```
 
-> Current status: both engines work end to end. They load and link bionic and the target `.so`, run `init_array` and `JNI_OnLoad`, call exports, and handle syscalls and JNI. It's only a subset of unidbg, so see [Compared to unidbg](#compared-to-unidbg) for what's missing.
+> Current status: all three engines work end to end. They load and link bionic and the target `.so`, run `init_array` and `JNI_OnLoad`, call exports, and handle syscalls and JNI. It's only a subset of unidbg, so see [Compared to unidbg](#compared-to-unidbg) for what's missing.
 
 ---
 
@@ -25,9 +25,10 @@ sum, _ := e.CallSymbol("add", 2, 3) // -> 5, executed as real AArch64 code
 unidbg is the de-facto tool for emulating Android native libraries, but it runs on a JVM and pulls in a fairly large stack. gonidbg tries to do the core of the same job in Go:
 
 - No JVM. The build output is a single Go binary, so startup is fast and memory use is low.
-- Swappable engine. Unicorn is stable and the default; dynarmic is a JIT and roughly 5–9× faster on warm calls; you can choose at build time or at runtime, much like unidbg's backends.
+- Swappable engine. The built-in pure-Go interpreter (`interp`) needs no external library at all; Unicorn is stable and becomes the default once installed; dynarmic is a JIT and faster on warm calls. Choose at build time or at runtime, much like unidbg's backends.
+- Genuinely zero-dependency. You don't have to install an engine: `CGO_ENABLED=0 go build ./cmd/gonidbg` produces a binary that loads a `.so` and executes its native code with no zig, no `unicorn.dll`, and no C toolchain.
 - Reuses real bionic. It loads and emulates `libc/libm/libdl` from an AOSP sysroot instead of reimplementing libc.
-- Small codebase. The framework itself is a few thousand lines of reasonably readable Go, plus two thin CPU-engine shims.
+- Small codebase. The framework itself is a few thousand lines of reasonably readable Go; the CPU layer is a pure-Go AArch64 interpreter plus two thin shims for the external engines.
 
 ## Features
 
@@ -43,7 +44,8 @@ unidbg is the de-facto tool for emulating Android native libraries, but it runs 
 - Load **real class/method/field metadata from a classes.dex** (`Config.DexPath` / `LoadDex`): FindClass/GetMethodID/GetFieldID resolve against true signatures and superclasses (metadata only, no bytecode).
 - Memory helpers: alloc, read/write bytes, C-strings, and LE integers.
 - Per-instruction trace, plus a full instruction-stream trace (`TraceInsns`: per-instruction offset + opcode + register deltas + call/syscall annotations, Tenet-style, diffable against a real-device trace; Unicorn).
-- Selectable engine: build with `-tags unicorn`, `-tags dynarmic`, or both, and choose at runtime with `-engine` / `$GONIDBG_ENGINE`.
+- Selectable engine: the **pure-Go interpreter is always available** (no build tag); add `-tags unicorn` and/or `-tags dynarmic`, then choose at runtime with `-engine` / `$GONIDBG_ENGINE`.
+- The pure-Go engine's correctness is held up by a **differential test**: one instruction at a time against Unicorn, comparing general-purpose registers, all vector registers, and memory (`internal/emu/diff_test.go`).
 
 ## Quick start
 
@@ -51,9 +53,9 @@ unidbg is the de-facto tool for emulating Android native libraries, but it runs 
 
 - Go 1.24+
 - [zig](https://ziglang.org/download/) on `PATH`, used as the C/C++ cross-compiler for cgo (no gcc or MSVC needed).
-- One CPU engine:
-  - Unicorn (default): the build script vendors it via `pip install unicorn` automatically.
-  - dynarmic (optional, faster): run `./build-dynarmic.sh` once to vendor and statically build it. See [BUILD.md](BUILD.md).
+- A CPU engine — **optional**, since the pure-Go `interp` engine is always compiled in and needs nothing installed:
+  - Unicorn: the build script vendors it via `pip install unicorn` automatically.
+  - dynarmic (faster): run `./build-dynarmic.sh` once to vendor and statically build it. See [BUILD.md](BUILD.md).
 
 ### Build & run the example
 
@@ -87,7 +89,7 @@ import "github.com/sisi0318/gonidbg/emulator"
 e, err := emulator.New(emulator.Config{
     SOPath:    "libfoo.so",        // loaded + init_array + JNI_OnLoad at boot
     AssetRoot: emulator.Locate("assets"),
-    Engine:    "",                 // "unicorn" | "dynarmic" | "" = auto
+    Engine:    "",                 // "interp" | "unicorn" | "dynarmic" | "" = auto
 })
 if err != nil { panic(err) }
 defer e.Close()
@@ -131,12 +133,22 @@ This is how unidbg's `AbstractJni` works: the guest's `RegisterNatives`/`GetMeth
 
 | engine | build tag | linkage | speed (warm) | license |
 |---|---|---|---|---|
-| **Unicorn2** | `-tags unicorn` | runtime `dlopen` of libunicorn | ~20 ms/call | GPLv2 |
+| **interp** (pure Go) | none, always available | **no dependency** (pure Go, no cgo) | ~13 ms/call | Apache-2.0 |
+| **Unicorn2** | `-tags unicorn` | runtime `dlopen` of libunicorn | ~13 ms/call | GPLv2 |
 | **dynarmic** | `-tags dynarmic` | **static** (C++ via zig) | ~2–4 ms/call | 0BSD |
 
-- Build both into one binary (`-tags "unicorn dynarmic"`) and pick at runtime: `gonidbg -engine dynarmic …` or `GONIDBG_ENGINE=dynarmic`.
-- The first call on a fresh emulator takes a few hundred ms (dynarmic compiles the JIT, Unicorn warms up); after that, reuse the emulator and the calls are fast.
-- Licensing note: Unicorn is GPLv2, and statically linking it would make the combined binary GPLv2, so gonidbg keeps it behind a runtime `dlopen` boundary. dynarmic is 0BSD (permissive), so the static dynarmic build has no copyleft entanglement. See [BUILD.md](BUILD.md) for building dynarmic.
+- Build several into one binary (`-tags "unicorn dynarmic"`) and pick at runtime: `gonidbg -engine interp …` or `GONIDBG_ENGINE=interp`. With no tags you get `interp` alone, and it is the default; with Unicorn present, Unicorn wins (it is the long-proven one).
+- The speeds above are one sign call on a real production obfuscated `.so` (~2.9M instructions, reusing the emulator). The pure-Go interpreter is on par with Unicorn and starts an order of magnitude faster (~9 ms vs ~144 ms), since there is no JIT warm-up and no shared library to load.
+- The pure-Go engine also removes a few cgo headaches: no dedicated engine thread on Windows, per-instruction hooks and tracing are ordinary Go calls (so they are cheap), and writing to a code page invalidates its decoded instructions automatically — self-modifying code needs no explicit cache flush.
+- Licensing note: Unicorn is GPLv2, and statically linking it would make the combined binary GPLv2, so gonidbg keeps it behind a runtime `dlopen` boundary. dynarmic is 0BSD (permissive), so the static dynarmic build has no copyleft entanglement. The pure-Go `interp` is this repository's own code under Apache-2.0, with no entanglement at all. See [BUILD.md](BUILD.md) for building dynarmic.
+
+### How the pure-Go engine is validated
+
+The real risk in writing your own CPU is being quietly wrong, so `interp` was calibrated against Unicorn instruction by instruction:
+
+- **Differential test** (`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`): take a random instruction encoding, execute exactly one instruction on both engines from the same random starting state, then compare all 34 general-purpose registers, all 32 vector registers, and the memory pages touched. Observing the vector registers needs no extra backend API — a preamble loads V0..V31 from guest memory and a postamble stores them back, so the whole register file travels through memory both engines expose. 1.5M sampled instructions currently agree exactly.
+- **Real workload**: a full signature run on that production `.so` reproduces all 8 X-* headers (X-Argus, X-Gorgon, X-Ladon, …) **byte-for-byte** against Unicorn, and a static census confirms the decoder covers every one of the 51M instructions it executes (39,891 distinct encodings).
+- Note the division of labour: the differential test can only prove that the instructions this decoder *accepts* compute the right answer. It cannot reveal a *missing* instruction, because an encoding the decoder refuses is never offered as a test case — that gap is covered by the real workload and the encoding census.
 
 ## How it works
 
@@ -147,7 +159,7 @@ This is how unidbg's `AbstractJni` works: the guest's `RegisterNatives`/`GetMeth
 3. Initialize: run `DT_INIT` and `init_array`, plus `JNI_OnLoad` (if the library exports it) with a synthesized `JavaVM`.
 4. Call: `CallSymbol`/`CallOffset` put the args in `X0..X7`, set `LR` to a sentinel, and run until return. An SVC trap is dispatched to the syscall layer (`internal/kernel`), the JNI layer, or a Go-implemented libc or replaced function.
 
-Guest memory and registers are exchanged through the `Backend` interface, which both engine shims implement. The dynarmic backend serves guest memory through a direct page table, so the JIT'd code reads and writes host memory directly and only SVC traps cross back into Go.
+Guest memory and registers are exchanged through the `Backend` interface, which all three engines implement. The pure-Go `interp` keeps the guest address space in a three-level page table (fronted by small direct-mapped TLBs) and decodes each executable page into an array of instructions the first time it runs, so the hot loop is a cache lookup plus an indirect call. The dynarmic backend serves guest memory through a direct page table, so the JIT'd code reads and writes host memory directly and only SVC traps cross back into Go.
 
 ### Layout
 
@@ -156,7 +168,8 @@ gonidbg/
 ├── emulator/     public API: New, LoadLibrary, CallSymbol/CallOffset, Replace, memory helpers
 ├── dvm/          public: fake Dalvik VM — VM, Object, Class, Jni, AbstractJni, VaList
 ├── internal/
-│   ├── emu/      CPU backend interface + registry; unicorn (cgo) and dynarmic (cgo/C++) shims
+│   ├── arm64/    pure-Go AArch64 interpreter (CPU + paged memory, no cgo)
+│   ├── emu/      CPU backend interface + registry; interp (pure Go), unicorn (cgo), dynarmic (cgo/C++)
 │   ├── loader/   ELF parsing + dynamic linker
 │   ├── kernel/   AArch64 Linux syscall subset
 │   ├── memory/   guest address-space allocator
@@ -173,14 +186,15 @@ gonidbg/
 
 ## Compared to unidbg
 
-Implemented: AArch64 ELF load and dynamic linking, real bionic reuse, selectable Unicorn/dynarmic backend, a Linux syscall subset (including uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity), JNI/JavaVM with a Go handler (strings, byte and object arrays, exceptions, more Call variants), call by symbol or offset, function `Replace` plus inline hooks (`HookAddr`), a console debugger (breakpoints/step/registers/memory), loading real class/method/field metadata from a classes.dex, memory helpers, and instruction trace.
+Implemented: AArch64 ELF load and dynamic linking, real bionic reuse, a built-in pure-Go AArch64 interpreter (zero dependencies) plus selectable Unicorn/dynarmic backends, a Linux syscall subset (including uname/sysinfo/getdents64/readlinkat/statx/prlimit64/sched_getaffinity), JNI/JavaVM with a Go handler (strings, byte and object arrays, exceptions, more Call variants), call by symbol or offset, function `Replace` plus inline hooks (`HookAddr`), a console debugger (breakpoints/step/registers/memory), loading real class/method/field metadata from a classes.dex, memory helpers, and instruction trace.
 
 Not yet (roadmap, and PRs are welcome):
 
 - ARM32; only AArch64 for now.
 - JNI and syscalls are still subsets: they cover common usage, not all ~232 JNI slots or the full syscall table.
 - DEX is metadata-only. It parses classes/methods/fields (signatures, superclasses) so FindClass/GetMethodID/GetFieldID resolve, but it does not execute DEX bytecode (no JVM); model Java-side behavior with a `dvm.Jni` handler.
-- Inline hooks and the console debugger require the Unicorn engine (dynarmic is a block JIT with no per-instruction hook).
+- Inline hooks and the console debugger need per-instruction hooks, which `interp` and Unicorn both provide and dynarmic does not (it is a block JIT).
+- The pure-Go interpreter targets the same CPU Unicorn models, so it has no FEAT_FP16 (half-precision arithmetic), no FEAT_LSE (CAS/SWP/LDADD), no pointer authentication and no SVE. Those raise a clear "unimplemented instruction" error rather than computing something wrong.
 - Truly concurrent threads (there is now a single-core cooperative scheduler — `pthread_create` makes a fiber, the scheduler time-slices and saves/restores CPU context at futex/sleep — but not real concurrency), signals, and iOS / Mach-O.
 
 ## Building from source / engines
@@ -188,13 +202,19 @@ Not yet (roadmap, and PRs are welcome):
 See [BUILD.md](BUILD.md) for the full toolchain (zig as the C/C++ compiler), the pure-Go and engine layers, the static dynarmic build (`build-dynarmic.sh`), and the Windows/Linux notes.
 
 ```bash
-# pure-Go layer builds and tests anywhere (no engine, no cgo):
+# Pure Go: builds and tests anywhere, and this is already a working emulator
+# (the interp engine):
 CGO_ENABLED=0 go build ./...
 CGO_ENABLED=0 go test ./...
+CGO_ENABLED=0 go run ./cmd/gonidbg examples/native/native.so add 2 3   # -> 5
 
-# engine integration test (loads the bundled native.so and runs it):
+# External-engine integration tests (load the bundled native.so and run it):
 go test -tags unicorn  ./emulator
 go test -tags dynarmic ./emulator
+
+# Pure-Go engine vs Unicorn, one instruction at a time (20k by default):
+go test -tags unicorn -run TestDiffUnicorn ./internal/emu
+GONIDBG_DIFF_N=1000000 GONIDBG_DIFF_SEED=7 go test -tags unicorn -timeout 2h -run TestDiffUnicorn ./internal/emu
 ```
 
 ## Credits & license
@@ -202,7 +222,7 @@ go test -tags dynarmic ./emulator
 gonidbg builds on:
 
 - [unidbg](https://github.com/zhkl0228/unidbg) (Apache-2.0): the project this reimplements.
-- [Unicorn Engine](https://github.com/unicorn-engine/unicorn) (GPLv2): the default CPU backend, loaded at runtime.
+- [Unicorn Engine](https://github.com/unicorn-engine/unicorn) (GPLv2): an optional CPU backend, loaded at runtime, and the reference the pure-Go interpreter is validated against.
 - [dynarmic](https://github.com/lioncash/dynarmic) (0BSD): the optional JIT CPU backend.
 - AOSP bionic (Apache-2.0) and others: the bundled sysroot under `assets/`. See [NOTICE](NOTICE).
 

@@ -128,6 +128,9 @@ type unicornBackend struct {
 	pendingFlush atomic.Bool
 }
 
+// CodeHooksSupported: unicorn calls code hooks per instruction.
+func (b *unicornBackend) CodeHooksSupported() bool { return true }
+
 // hookAdded makes a newly added code/memory hook visible to already-translated
 // code (see the depth field).
 func (b *unicornBackend) hookAdded() {
