@@ -52,6 +52,16 @@ func b32(v float64) uint64 {
 func f64(b uint64) float64 { return math.Float64frombits(b) }
 func b64(v float64) uint64 { return math.Float64bits(v) }
 
+// quietNaN quietens a NaN and leaves anything else alone. FCVT between
+// floating-point sizes runs its operand through FPProcessNaN, which converts a
+// signaling NaN to a quiet one while keeping the sign and payload.
+func quietNaN(v float64) float64 {
+	if math.IsNaN(v) {
+		return math.Float64frombits(math.Float64bits(v) | 1<<51)
+	}
+	return v
+}
+
 // isSignalingNaN reports whether v is a signaling NaN (quiet bit clear).
 func isSignalingNaN(v float64) bool {
 	u := math.Float64bits(v)
@@ -94,18 +104,30 @@ func b16(v float64) uint64 {
 	frac := bits & (1<<52 - 1)
 	switch {
 	case math.IsNaN(v):
-		return uint64(sign | 0x7e00)
+		// Propagate the payload quietened, as FPConvertNaN does: the half
+		// mantissa takes the top 10 bits of the wider one, and the quiet bit
+		// is forced (which also keeps the mantissa non-zero, so the result
+		// cannot collapse into an infinity).
+		return uint64(sign | 0x7c00 | uint16(frac>>42)&0x3ff | 0x200)
 	case math.IsInf(v, 0):
 		return uint64(sign | 0x7c00)
 	case v == 0:
 		return uint64(sign)
 	case exp > 15:
-		return uint64(sign | 0x7c00)
-	case exp < -24:
-		return uint64(sign)
-	case exp < -14: // subnormal
-		sh := uint(-exp - 14)
-		m := (frac | 1<<52) >> (42 + sh)
+		return uint64(sign | 0x7c00) // overflows to infinity
+	case exp < -36:
+		return uint64(sign) // far below half of the smallest subnormal
+	case exp < -14:
+		// Subnormal: shift the 53-bit significand down to the 10-bit mantissa
+		// and round to nearest even, like the normal case below. A carry out of
+		// the mantissa lands on exponent field 1 with a zero mantissa, which is
+		// exactly the smallest normal, so it needs no special case.
+		shift := uint(28 - exp)
+		sig := frac | 1<<52
+		m := sig >> shift
+		if rem, half := sig&(1<<shift-1), uint64(1)<<(shift-1); rem > half || (rem == half && m&1 == 1) {
+			m++
+		}
 		return uint64(sign | uint16(m))
 	default:
 		// round to nearest even on the 10-bit significand
@@ -315,7 +337,7 @@ func opFcsel(c *CPU, i *inst) {
 }
 
 func opFcvtFP(c *CPU, i *inst) {
-	v := fpTypes[i.sz].get(c.V[i.rn][0])
+	v := quietNaN(fpTypes[i.sz].get(c.V[i.rn][0]))
 	c.V[i.rd] = Vec{fpTypes[i.sh].put(v), 0}
 	c.PC += 4
 }
@@ -1332,8 +1354,7 @@ func opSimdFcvtWiden(c *CPU, i *inst) {
 	n := c.V[i.rn]
 	var out Vec
 	for l := 0; l < lanes; l++ {
-		out1 := to.put(from.get(getLane(n, src, base+l)))
-		setLane(&out, src*2, l, out1)
+		setLane(&out, src*2, l, to.put(quietNaN(from.get(getLane(n, src, base+l)))))
 	}
 	c.V[i.rd] = out
 	c.PC += 4
@@ -1360,7 +1381,7 @@ func opSimdFcvtNarrow(c *CPU, i *inst) {
 	}
 	n := c.V[i.rn]
 	for l := 0; l < lanes; l++ {
-		setLane(&out, dst, base+l, to.put(from.get(getLane(n, dst*2, l))))
+		setLane(&out, dst, base+l, to.put(quietNaN(from.get(getLane(n, dst*2, l)))))
 	}
 	c.V[i.rd] = out
 	c.PC += 4
