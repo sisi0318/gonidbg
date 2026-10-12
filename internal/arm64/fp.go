@@ -414,15 +414,24 @@ func opFP2(c *CPU, i *inst) {
 // NaN goes through nanFix.
 var defaultNaN = math.Float64frombits(0x7ff8000000000000)
 
-// nanFix applies the architectural NaN rules: propagate an input NaN after
-// quietening it, otherwise return the default NaN.
+// nanFix applies the architectural NaN rules (FPProcessNaNs): a signaling
+// input NaN wins over a quiet one whatever the operand order, is quietened,
+// and propagates; a quiet one propagates unchanged; otherwise the operation
+// was invalid and the result is the default NaN. ins must be in the order the
+// architecture inspects the operands, which for a multiply-add is addend
+// first.
 func nanFix(res float64, ins ...float64) float64 {
 	if !math.IsNaN(res) {
 		return res
 	}
 	for _, v := range ins {
-		if math.IsNaN(v) {
+		if isSignalingNaN(v) {
 			return math.Float64frombits(math.Float64bits(v) | 1<<51)
+		}
+	}
+	for _, v := range ins {
+		if math.IsNaN(v) {
+			return v
 		}
 	}
 	return defaultNaN
@@ -550,9 +559,9 @@ func fma(a, b, acc float64, o fpOps) float64 {
 		// float32 FMA: math.FMA of the widened operands is exactly rounded in
 		// float64, and float64 carries more than 2*24+2 bits, so narrowing the
 		// result afterwards does not double-round.
-		return nanFix(float64(float32(math.FMA(a, b, acc))), a, b, acc)
+		return nanFix(float64(float32(math.FMA(a, b, acc))), acc, a, b)
 	}
-	return nanFix(math.FMA(a, b, acc), a, b, acc)
+	return nanFix(math.FMA(a, b, acc), acc, a, b)
 }
 
 // ---- FP <-> integer --------------------------------------------------------
