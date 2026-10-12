@@ -19,6 +19,7 @@ import "C"
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -115,6 +116,34 @@ func init() { Register("unicorn", newUnicornBackend) }
 type unicornBackend struct {
 	e   *C.ucs_engine
 	cbs []uint64
+
+	// Unicorn decides at translation time whether a block calls code/memory
+	// hooks, so a hook added after a block was translated never fires there —
+	// e.g. HookAddr or a tracer installed on a warm emulator sees nothing of the
+	// code the previous call already ran. Adding a hook therefore flushes the TB
+	// cache. Flushing from inside a hook callback (a TB may be mid-execution) is
+	// not safe, so while the engine runs the flush is deferred to the next
+	// top-level Start.
+	depth        atomic.Int32 // nested Start/StartCount calls in progress
+	pendingFlush atomic.Bool
+}
+
+// hookAdded makes a newly added code/memory hook visible to already-translated
+// code (see the depth field).
+func (b *unicornBackend) hookAdded() {
+	if b.depth.Load() != 0 {
+		b.pendingFlush.Store(true)
+		return
+	}
+	_ = b.FlushCache()
+}
+
+func (b *unicornBackend) start(begin, until, count uint64) C.uc_err {
+	if b.depth.Add(1) == 1 && b.pendingFlush.Swap(false) {
+		_ = b.FlushCache()
+	}
+	defer b.depth.Add(-1)
+	return C.ucs_emu_start(b.e, C.uint64_t(begin), C.uint64_t(until), 0, C.size_t(count))
 }
 
 func newUnicornBackend() (Backend, error) {
@@ -250,6 +279,7 @@ func (b *unicornBackend) HookCode(start, end uint64, fn CodeHookFunc) (HookHandl
 		return nil, ucErr("hook_code", e)
 	}
 	b.cbs = append(b.cbs, id)
+	b.hookAdded()
 	return &ucHook{b, uint64(hh), id}, nil
 }
 
@@ -283,6 +313,7 @@ func (b *unicornBackend) HookMemRead(start, end uint64, fn func(Backend, uint64,
 		return nil, ucErr("hook_mem_read", e)
 	}
 	b.cbs = append(b.cbs, id)
+	b.hookAdded()
 	return &ucHook{b, uint64(hh), id}, nil
 }
 
@@ -294,18 +325,19 @@ func (b *unicornBackend) HookMemWrite(start, end uint64, fn func(Backend, uint64
 		return nil, ucErr("hook_mem_write", e)
 	}
 	b.cbs = append(b.cbs, id)
+	b.hookAdded()
 	return &ucHook{b, uint64(hh), id}, nil
 }
 
 func (b *unicornBackend) Start(begin, until uint64) error {
-	if e := C.ucs_emu_start(b.e, C.uint64_t(begin), C.uint64_t(until), 0, 0); e != C.UC_ERR_OK {
+	if e := b.start(begin, until, 0); e != C.UC_ERR_OK {
 		return ucErr("emu_start", e)
 	}
 	return nil
 }
 
 func (b *unicornBackend) StartCount(begin, until, count uint64) error {
-	if e := C.ucs_emu_start(b.e, C.uint64_t(begin), C.uint64_t(until), 0, C.size_t(count)); e != C.UC_ERR_OK {
+	if e := b.start(begin, until, count); e != C.UC_ERR_OK {
 		return ucErr("emu_start", e)
 	}
 	return nil

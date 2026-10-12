@@ -102,6 +102,12 @@ func TestInlineHook(t *testing.T) {
 	}
 	defer e.Close()
 
+	// Run add once first, so the hook lands on already-translated code: Unicorn
+	// only instruments blocks translated after a hook exists, so this fails
+	// unless installing the hook invalidates the code cache.
+	if r, _ := e.CallSymbol("add", 2, 3); int32(r) != 5 {
+		t.Fatalf("add(2,3) = %d, want 5", int32(r))
+	}
 	rm, err := e.HookSymbol("add", func(h *Hook) { h.SetArg(1, h.Arg(1)+100) })
 	if e.Engine() != "unicorn" {
 		if err == nil {
