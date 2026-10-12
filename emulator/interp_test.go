@@ -156,6 +156,32 @@ func TestInterpTrace(t *testing.T) {
 	}
 }
 
+// TestInterpDebugger breaks at a symbol, scripts the console, and checks the
+// call still returns. Like the tracer this needs per-instruction hooks.
+func TestInterpDebugger(t *testing.T) {
+	e := newInterp(t)
+	defer e.Close()
+
+	d, err := e.NewDebugger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Detach()
+
+	var out bytes.Buffer
+	d.Out = &out
+	d.In = strings.NewReader("r\nc\n") // dump registers, then continue
+	if err := d.BreakSymbol("add"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := e.CallSymbol("add", 2, 3); int32(r) != 5 {
+		t.Fatalf("add(2,3) = %d, want 5", int32(r))
+	}
+	if s := out.String(); !strings.Contains(s, "x0") {
+		t.Errorf("debugger output has no register dump:\n%s", s)
+	}
+}
+
 // TestInterpSnapshot checks that Restore rewinds guest state: the second call
 // must see the pristine heap and registers the first one started from.
 func TestInterpSnapshot(t *testing.T) {

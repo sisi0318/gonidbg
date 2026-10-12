@@ -372,6 +372,20 @@ func TestDiffUnicorn(t *testing.T) {
 		seed = v
 	}
 
+	// GONIDBG_DIFF_INSN pins one encoding and hammers it with random operand
+	// states — the way to chase down a single mismatch found by a wide sweep.
+	var pinned uint32
+	if v := os.Getenv("GONIDBG_DIFF_INSN"); v != "" {
+		x, err := strconv.ParseUint(v, 0, 32)
+		if err != nil {
+			t.Fatalf("GONIDBG_DIFF_INSN: %v", err)
+		}
+		pinned = uint32(x)
+		if !arm64.Decodable(pinned) {
+			t.Fatalf("GONIDBG_DIFF_INSN %#08x: the interpreter does not decode it", pinned)
+		}
+	}
+
 	ref := newDiffEngine(t, "unicorn")
 	defer ref.b.Close()
 	got := newDiffEngine(t, "interp")
@@ -381,7 +395,9 @@ func TestDiffUnicorn(t *testing.T) {
 	tested, failures := 0, 0
 	for tested < n {
 		insn := rng.Uint32()
-		if !arm64.Decodable(insn) || excluded(insn) {
+		if pinned != 0 {
+			insn = pinned
+		} else if !arm64.Decodable(insn) || excluded(insn) {
 			continue
 		}
 		tested++
@@ -397,7 +413,14 @@ func TestDiffUnicorn(t *testing.T) {
 		if d := diff(insn, want, have); d != "" {
 			failures++
 			if failures <= 20 {
-				t.Errorf("insn %#08x (seed %d, case %d) differs:%s", insn, seed, tested, d)
+				extra := ""
+				if pinned != 0 { // chasing one encoding: show its operands
+					rn, rm := (insn>>5)&31, (insn>>16)&31
+					extra = fmt.Sprintf("\n    in: v%d=%016x%016x v%d=%016x%016x x%d=%#x x%d=%#x",
+						rn, st.v[rn][1], st.v[rn][0], rm, st.v[rm][1], st.v[rm][0],
+						rn, st.x[rn], rm, st.x[rm])
+				}
+				t.Errorf("insn %#08x (seed %d, case %d) differs:%s%s", insn, seed, tested, d, extra)
 			}
 		}
 	}

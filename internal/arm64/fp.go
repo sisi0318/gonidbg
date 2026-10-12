@@ -905,23 +905,35 @@ func fpVecOp(op int, a, b, dst float64, o fpOps) float64 {
 	case vfABD:
 		return math.Abs(fpSub(a, b, o))
 	case vfRECPS, vfRSQRTS:
-		// FPRecipStepFused / FPRSqrtStepFused: an input NaN propagates, and a
-		// zero against an infinity yields the step constant rather than the
-		// NaN that 2 - (0 * inf) would otherwise produce.
-		if math.IsNaN(a) || math.IsNaN(b) {
-			return nanFix(defaultNaN, a, b)
+		// FPRecipStepFused / FPRSqrtStepFused. Both negate op1 first, and the
+		// negation happens *before* NaN processing — so a negative NaN comes
+		// back positive. A zero against an infinity gives the step constant
+		// rather than the NaN that 2 - (0 * inf) would produce.
+		na := -a
+		if math.IsNaN(na) || math.IsNaN(b) {
+			return nanFix(defaultNaN, na, b)
 		}
-		if (math.IsInf(a, 0) && b == 0) || (a == 0 && math.IsInf(b, 0)) {
+		if (math.IsInf(na, 0) && b == 0) || (na == 0 && math.IsInf(b, 0)) {
 			if op == vfRECPS {
 				return 2
 			}
 			return 1.5
 		}
 		if op == vfRECPS {
-			return fma(-a, b, 2, o) // fused: the product is not rounded first
+			return fma(na, b, 2, o) // fused: the product is not rounded first
 		}
-		// FPHalvedSub(3, a*b); halving is exact, so it needs no second rounding
-		return fma(-a, b, 3, o) / 2
+		// (3 + na*b)/2 with a single rounding. Halving the fused sum is exact
+		// (the sum is never subnormal: it is either zero or bounded below by
+		// the cancellation limit of a double product), so this is exact
+		// whenever the sum itself is representable.
+		if r := fma(na, b, 3, o); !math.IsInf(r, 0) {
+			return r / 2
+		}
+		// The sum overflowed, yet the halved result may still be finite. At
+		// that magnitude the 3 is negligible and b is necessarily large, so
+		// halving b first is exact — unlike in the general case, where b can
+		// be subnormal and would lose its last bit.
+		return fma(na, b/2, 1.5, o)
 	case vfMULX:
 		// FMULX turns the invalid zero-times-infinity into +-2.0
 		if (a == 0 && math.IsInf(b, 0)) || (math.IsInf(a, 0) && b == 0) {

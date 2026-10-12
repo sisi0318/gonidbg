@@ -618,6 +618,9 @@ const (
 func decodeSIMD2Misc(in *inst, raw uint32, scalar bool) {
 	u, size, opcode := (raw>>29)&1, (raw>>22)&3, (raw>>12)&31
 	sel := u<<5 | opcode
+	// geomSize is the lane width used for the operation, which is not always
+	// the size field (see RBIT below).
+	geomSize := size
 	// The integer half of this group is opcodes 00000..01011 plus the narrowing
 	// and widening forms XTN/SHLL/SQXTN; everything else is floating point.
 	isInt := opcode <= 0b01011 || opcode == 0b10010 || opcode == 0b10011 || opcode == 0b10100
@@ -666,6 +669,7 @@ func decodeSIMD2Misc(in *inst, raw uint32, scalar bool) {
 			in.imm = 0b100101
 		} else if size == 1 {
 			in.imm = 0b100101 | 0x40
+			geomSize = 0 // RBIT reverses bits inside each byte, not each halfword
 		} else {
 			return
 		}
@@ -718,7 +722,7 @@ func decodeSIMD2Misc(in *inst, raw uint32, scalar bool) {
 			return
 		}
 	}
-	simdGeom(in, raw, scalar, size)
+	simdGeom(in, raw, scalar, geomSize)
 	in.sh = uint8((raw >> 30) & 1)
 	in.fn = opSimd2Misc
 }
