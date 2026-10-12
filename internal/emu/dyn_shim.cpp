@@ -169,6 +169,7 @@ struct Engine {
 
 	std::uint64_t tpidr_el0 = 0;
 	std::uint64_t until = 0;          // PC that means "call returned" -> stop
+	bool returned = false;            // the until-address trap fired (see ExceptionRaised)
 	std::uint64_t intr_cbid = 0;      // Go SVC hook id
 	std::uint64_t mem_cbid = 0;       // Go unmapped-access hook id
 	std::uint64_t budget = 0;         // remaining instruction budget (runaway guard)
@@ -220,6 +221,7 @@ void Callbacks::ExceptionRaised(A64::VAddr pc, A64::Exception exception) {
 		// A code fetch hit an unmapped page. If it's the call sentinel, that's a
 		// normal return; otherwise it's a bad jump. Either way, stop.
 		if (pc != e->until) e->fault = true;
+		else e->returned = true;
 		e->jit->HaltExecution();
 		return;
 	}
@@ -354,10 +356,18 @@ int dyn_emu_start(dyn_engine *h, uint64_t begin, uint64_t until) {
 	e->until = until;
 	e->stop_requested = false;
 	e->fault = false;
+	e->returned = false;
 	e->budget = (1ull << 32); // runaway guard (~4e9 instructions)
 	e->jit->SetPC(begin);
 	e->jit->ClearHalt(); // clear any stale halt flag from a previous run
 	e->jit->Run();
+	if (e->returned) {
+		// dynarmic's RaiseException does SetPC(pc + 4) before raising, so a
+		// NoExecuteFault leaves PC one instruction past the address that
+		// faulted. Put it back: the caller's contract is that PC == until means
+		// the call returned, and it reports anything else as a failed call.
+		e->jit->SetPC(e->until);
+	}
 	uint64_t pc = e->jit->GetPC();
 	if (e->stop_requested) return DYN_OK;            // explicit stop (e.g. exit_group)
 	if (e->fault) return DYN_ERR_RUN;                // bad jump / interpreter fallback

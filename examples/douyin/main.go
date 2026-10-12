@@ -85,10 +85,12 @@ func main() {
 		emulator.SnapLo = 0x40100000
 		emulator.SnapHi = 0x40600000
 	}
+	// The tracer needs per-instruction hooks, which the dynarmic engine does
+	// not have (it is a block JIT). Signing works there regardless, so carry on
+	// without a trace rather than refusing to run.
 	stopTrace, err := startTrace(e, tracePath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "trace:", err)
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "trace unavailable:", err)
 	}
 
 	raw, err := sign(e, url, cookie)
