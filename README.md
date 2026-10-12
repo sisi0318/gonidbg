@@ -152,6 +152,7 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 | **dynarmic** | `-tags dynarmic` | **静态链接**(C++ via zig) | ~2.1 ms/次 | 0BSD |
 
 - 引擎可以同时编进一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine interp …` 或 `GONIDBG_ENGINE=interp`。没有任何标签时只有 `interp`,它也是这时的默认;装了 Unicorn 则优先用 Unicorn。
+- **不想自己编译 dynarmic**:[Releases](https://github.com/sisi0318/gonidbg/releases) 里有把 dynarmic 静态链进去的预编译二进制(Linux x86-64,musl 全静态,约 7 MB 单文件,不需要 libc 也不需要任何 `.so`)。dynarmic 是 0BSD,静态分发没有 copyleft 义务。自己打的话是 `ZIG_TARGET=x86_64-linux-musl ./build-dynarmic.sh` + `PORTABLE=1 ./build.sh`。
 - 表里的速度是同一台机器上三个引擎实测:一个真实的生产混淆 `.so` 的一次签名调用,约 290 万条指令,复用同一个模拟器。解释器的冷启动还快一个数量级(约 9 ms vs 120 ms),没有 JIT 预热也不用加载动态库;逐指令 hook 是普通 Go 调用而不跨 cgo 边界,完整指令 trace 因此比 Unicorn 快一个量级。
 - 为什么解释器追不上 dynarmic、追上要付什么代价,测量和结论都在 [internal/arm64/PERF.md](internal/arm64/PERF.md);基准测试是 `go test -run X -bench . ./internal/arm64`。
 - 纯 Go 引擎顺带少了两个 cgo 的麻烦:Windows 上不需要专属的引擎线程,写入代码页会自动让已解码的指令失效(自修改代码不用手动刷缓存)。

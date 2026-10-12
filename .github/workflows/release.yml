@@ -1,0 +1,105 @@
+name: Release binaries
+
+# Publishes prebuilt binaries so nobody has to build dynarmic themselves. The
+# dynarmic engine is ~4.6x faster per instruction than the pure-Go one but needs
+# a C++ toolchain, cmake, Boost headers and a patched build (see
+# build-dynarmic.sh); that is a lot to ask of someone who just wants the fast
+# engine. These artifacts have it statically linked, which dynarmic's 0BSD
+# licence allows without any copyleft obligation.
+#
+# The Linux artifact is built against musl and fully static: one file, no libc
+# and no .so to ship next to it, runs on any x86-64 Linux. It carries the
+# dynarmic engine only — unicorn would need its shared library alongside, which
+# is exactly the hassle this is avoiding, and the pure-Go interpreter is always
+# compiled in anyway.
+#
+# Triggered by pushing a tag (v*), or by hand from the Actions tab.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install zig
+        run: |
+          ZIG=zig-x86_64-linux-0.15.2
+          curl -fSL "https://ziglang.org/download/0.15.2/$ZIG.tar.xz" -o zig.tar.xz
+          tar xf zig.tar.xz
+          echo "$PWD/$ZIG" >> "$GITHUB_PATH"
+
+      # build-dynarmic.sh pip-installs cmake and ninja, which a system Python
+      # refuses under PEP 668. Put a venv first on PATH so its `python` is the
+      # one the script finds.
+      - name: Python venv for cmake/ninja
+        run: |
+          python3 -m venv "$HOME/.venv"
+          echo "$HOME/.venv/bin" >> "$GITHUB_PATH"
+
+      # The dynarmic static libs are the slow part (~10 min) and only change
+      # when dynarmic or the build script does. Caching the vendor dir alone is
+      # enough: build-dynarmic.sh copies the headers into it, so the source
+      # tree is not needed afterwards.
+      - name: Cache dynarmic static libs
+        id: dyncache
+        uses: actions/cache@v4
+        with:
+          path: ~/dynvendor-musl
+          key: dynarmic-musl-${{ hashFiles('build-dynarmic.sh') }}-v1
+
+      - name: Build dynarmic (static, musl)
+        if: steps.dyncache.outputs.cache-hit != 'true'
+        run: ZIG_TARGET=x86_64-linux-musl DYN_VENDOR=$HOME/dynvendor-musl ./build-dynarmic.sh
+
+      - name: Build the binaries
+        run: PORTABLE=1 WITH_SERVER=1 DYN_VENDOR=$HOME/dynvendor-musl ./build.sh
+
+      # A static binary that silently depends on something would defeat the
+      # point, so check it really is static and really runs.
+      - name: Verify
+        run: |
+          file bin/gonidbg
+          ldd bin/gonidbg 2>&1 | grep -qi 'not a dynamic executable\|statically linked' \
+            || { echo "not static:"; ldd bin/gonidbg; exit 1; }
+          ./bin/gonidbg examples/native/native.so add 2 3 | tee /tmp/out
+          grep -q 'add(\[2 3\]) = 5' /tmp/out
+          ./bin/gonidbg -engine dynarmic examples/native/native.so fib 20 | grep -q 6765
+          ./bin/gonidbg -engine interp   examples/native/native.so fib 20 | grep -q 6765
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gonidbg-linux-amd64-static
+          path: |
+            bin/gonidbg
+            bin/douyin
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/gonidbg
+            bin/douyin
+          body: |
+            Prebuilt binaries with the **dynarmic** JIT statically linked, so you
+            do not need a C++ toolchain to get the fast engine.
+
+            - `gonidbg` — the CLI. `-engine dynarmic` (fastest) or `-engine interp`
+              (pure Go, always available).
+            - `douyin` — the HTTP sign service (`examples/dy-server`); bring your
+              own `.so`.
+
+            Linux x86-64, built against musl and fully static: no libc and no
+            shared library to ship alongside. Unicorn is not included, since it
+            would need its `.so` next to the binary.

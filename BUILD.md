@@ -106,6 +106,21 @@ dynarmic 是 ARM JIT(yuzu/citra/unidbg 同款),比 Unicorn 解释器快。它只
 
 > 脚本里几个**绕坑**(zig=clang20 + libc++20 对老依赖较严):用 toolchain 文件钉死 `zig ar/ranlib`(否则 `CMAKE_AR-NOTFOUND`);patch fmt 关 consteval、去掉 libc++ 已删的 `<__std_stream>`;给 mcl 加一个 `std::integer_sequence` 具体特化。并行编译用 `-j4`(过高会触发 zig 缓存竞争 `error: Unexpected`)。
 
+### 1.5 预编译:不想自己编译 dynarmic
+
+dynarmic 的收益明显(单次签名 2.1 ms vs 解释器 9.6 ms),但要 C++ 工具链、cmake、Boost 头文件和几个补丁。不想碰这些就有两条路:
+
+- 直接下 [Releases](https://github.com/sisi0318/gonidbg/releases) 里的预编译二进制。Linux x86-64、musl 全静态,约 7 MB 单文件,dynarmic 已经静态链进去,`interp` 也在里面;不需要 libc,也不需要在旁边放任何 `.so`。CI(`.github/workflows/release.yml`)就是这么打的。
+- 自己打一份同样的静态单文件:
+
+```bash
+ZIG_TARGET=x86_64-linux-musl DYN_VENDOR=~/dynvendor-musl ./build-dynarmic.sh
+PORTABLE=1 WITH_SERVER=1 DYN_VENDOR=~/dynvendor-musl ./build.sh
+# -> ./bin/gonidbg(CLI)和 ./bin/douyin(dy-server),都是全静态
+```
+
+`build-dynarmic.sh` 会把头文件一起 vendoring 到 `$DYN_VENDOR/include`,所以**编完之后 dynarmic 源码树可以删掉**,后续构建只认 `$DYN_VENDOR`。
+
 ### 2. 用 dynarmic 构建 Go 服务
 
 ```bash

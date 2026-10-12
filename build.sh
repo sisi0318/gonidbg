@@ -55,7 +55,9 @@ if [ "${PORTABLE:-0}" = "1" ]; then
   WITH_DYNARMIC=1
   export GOOS=linux GOARCH=amd64
   export CC="zig cc -target $PTARGET" CXX="zig c++ -target $PTARGET"
-  LDARGS=(-ldflags '-linkmode external -extldflags "-static"')
+  # -s -w drops the symbol table and DWARF: this mode exists to ship a binary,
+  # and they are more than half its size.
+  LDARGS=(-ldflags '-s -w -linkmode external -extldflags "-static"')
   echo "[build] PORTABLE: static cross-build -> $PTARGET (one binary, runs on any x86-64 linux)"
 else
   case "$(uname -s)" in
@@ -100,7 +102,17 @@ if [ "${WITH_DYNARMIC:-0}" = "1" ]; then
     echo "        (set DYN_VENDOR to where it was vendored)."
     exit 1
   fi
-  export CGO_CXXFLAGS="-I$DYN_SRC/src -std=c++20 $MFLAG ${CGO_CXXFLAGS:-}"
+  # Prefer the headers build-dynarmic.sh vendored into $DYN_VENDOR/include: it
+  # copies them there so the dynarmic source tree can be deleted afterwards.
+  # Fall back to the source tree for vendor dirs predating that.
+  DYN_INC="$DYN_VENDOR/include"
+  [ -d "$DYN_INC/dynarmic" ] || DYN_INC="$DYN_SRC/src"
+  if [ ! -d "$DYN_INC/dynarmic" ]; then
+    echo "[error] dynarmic headers not found in $DYN_VENDOR/include or $DYN_SRC/src"
+    echo "        re-run ./build-dynarmic.sh (set DYN_VENDOR/DYN_SRC to match)."
+    exit 1
+  fi
+  export CGO_CXXFLAGS="-I$DYN_INC -std=c++20 $MFLAG ${CGO_CXXFLAGS:-}"
   export CGO_LDFLAGS="-L$DYN_VENDOR/lib -ldynarmic -lmcl -lfmt -lZydis -lZycore -lc++ ${CGO_LDFLAGS:-}"
   echo "[build] dynarmic engine enabled (vendor: $DYN_VENDOR/lib)"
   echo "[build] NOTE: the linked libdynarmic.a must have been built at a compatible CPU"
