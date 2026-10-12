@@ -424,12 +424,14 @@ func decodeBranchReg(in *inst, raw uint32) {
 	}
 }
 
-func opBr(c *CPU, i *inst) { c.branchTo(c.R[i.rn]) }
+// A misaligned target is caught by the run loop, which has to check every PC
+// anyway (see CPU.Run).
+func opBr(c *CPU, i *inst) { c.PC = c.R[i.rn] }
 
 func opBlr(c *CPU, i *inst) {
 	t := c.R[i.rn]
 	c.R[rLR] = c.PC + 4
-	c.branchTo(t)
+	c.PC = t
 }
 
 func decodeException(in *inst, raw uint32) {

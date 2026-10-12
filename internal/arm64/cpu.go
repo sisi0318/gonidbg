@@ -77,6 +77,11 @@ type Context struct {
 	exclVal2   uint64
 	exclSize   int
 	exclValid  bool
+	// icount is included because it backs CNTVCT_EL0: without it a restored
+	// snapshot would read a different guest time than the run it was taken
+	// from, and a library that mixes the counter into its output would drift
+	// from call to call — the opposite of what Snapshot/Restore is for.
+	icount uint64
 }
 
 type codeHook struct {
@@ -88,8 +93,10 @@ type intrHook struct{ fn func(intno uint32) }
 
 // Exception numbers passed to interrupt hooks, matching QEMU's EXCP_* so a
 // hook sees the same intno as on Unicorn.
+// (QEMU's EXCP_UDEF has no entry here: an undefined instruction is reported as
+// an error from Run, which carries the encoding and the PC, rather than being
+// delivered to a hook that could only abort the call anyway.)
 const (
-	ExcpUDEF = 1
 	ExcpSWI  = 2
 	ExcpBKPT = 7
 	ExcpHLT  = 8
@@ -106,7 +113,7 @@ func New() *CPU {
 func (c *CPU) SaveContext() *Context {
 	x := &Context{PC: c.PC, NZCV: c.NZCV, V: c.V, FPCR: c.FPCR, FPSR: c.FPSR,
 		TPIDR: c.TPIDR, TPIDRRO: c.TPIDRRO, exclAddr: c.exclAddr, exclVal: c.exclVal,
-		exclVal2: c.exclVal2, exclSize: c.exclSize, exclValid: c.exclValid}
+		exclVal2: c.exclVal2, exclSize: c.exclSize, exclValid: c.exclValid, icount: c.icount}
 	copy(x.R[:], c.R[:33])
 	return x
 }
@@ -117,6 +124,7 @@ func (c *CPU) RestoreContext(x *Context) {
 	c.PC, c.NZCV, c.V, c.FPCR, c.FPSR = x.PC, x.NZCV, x.V, x.FPCR, x.FPSR
 	c.TPIDR, c.TPIDRRO = x.TPIDR, x.TPIDRRO
 	c.exclAddr, c.exclVal, c.exclVal2, c.exclSize, c.exclValid = x.exclAddr, x.exclVal, x.exclVal2, x.exclSize, x.exclValid
+	c.icount = x.icount
 }
 
 // X / SetX access X0..X30 (31 = SP).
@@ -142,6 +150,17 @@ func (c *CPU) InsnCount() uint64 { return c.icount }
 // Stop asks a running Run to return before the next instruction. Safe to call
 // from hooks and from other goroutines.
 func (c *CPU) Stop() { c.stopReq.Store(true) }
+
+// Release drops the guest address space, the decoded instructions and every
+// hook. The CPU stays usable but has nothing mapped, so a stray use after the
+// owning backend was closed reports unmapped memory instead of handing back
+// freed state — and a closed emulator stops pinning its guest pages.
+func (c *CPU) Release() {
+	c.Mem = Memory{}
+	c.Mem.init(&c.PC)
+	c.codeHooks = nil
+	c.intrHooks = nil
+}
 
 // AddCodeHook calls fn before each instruction in [begin, end] (begin > end:
 // every instruction). If fn changes PC or calls Stop, the instruction it was
@@ -222,6 +241,16 @@ func (c *CPU) Run(until, count uint64) (err error) {
 		if pc == until || c.icount >= limit || c.stopReq.Load() {
 			return nil
 		}
+		// The decoded-instruction array is indexed by pc>>2 while the encoding
+		// is read from byte offset pc&0xfff, so a misaligned PC would cache a
+		// garbage decode in the slot belonging to the aligned address (making a
+		// valid instruction fail later) and, near a page end, index past the
+		// page. PC can be set from outside (CallOffset, Hook.SetPC,
+		// RestoreContext) as well as by a branch, so this is checked here
+		// rather than at each of those.
+		if pc&3 != 0 {
+			return &cpuError{fmt.Sprintf("misaligned instruction address 0x%x", pc)}
+		}
 		if len(c.codeHooks) != 0 {
 			c.callCodeHooks(pc)
 			if c.stopReq.Load() {
@@ -277,13 +306,6 @@ func (c *CPU) raise(intno uint32) {
 	c.Mem.fetchVPN = noVPN // the hook may have remapped or rewritten code
 }
 
-func (c *CPU) branchTo(target uint64) {
-	if target&3 != 0 {
-		panic(&cpuError{fmt.Sprintf("misaligned branch target 0x%x at pc=0x%x", target, c.PC)})
-	}
-	c.PC = target
-}
-
 // codePage holds the decoded instructions of one executable page.
 type codePage struct {
 	pg    *page
@@ -299,11 +321,15 @@ func (cp *codePage) raw(pc uint64) uint32 {
 
 // inst is one decoded instruction. The meaning of the operand fields is up to
 // the handler; register fields hold R indices already remapped for SP/XZR.
+// Kept at 32 bytes so two decoded instructions share a cache line: the
+// instruction array is the interpreter's hottest memory, 8x the size of the
+// guest code it mirrors. That is why the original encoding is not stored here
+// — opUndef re-reads it from the code page, which costs nothing on a path that
+// is about to raise an error anyway.
 type inst struct {
 	fn   func(*CPU, *inst)
 	imm  uint64
 	imm2 uint64
-	raw  uint32
 	rd   uint8
 	rn   uint8
 	rm   uint8
@@ -315,16 +341,19 @@ type inst struct {
 }
 
 func decodeAt(in *inst, cp *codePage, pc uint64) {
-	raw := cp.raw(pc)
-	*in = inst{raw: raw}
-	decode(in, raw, pc)
+	*in = inst{}
+	decode(in, cp.raw(pc), pc)
 	if in.fn == nil {
 		in.fn = opUndef
 	}
 }
 
 func opUndef(c *CPU, i *inst) {
-	panic(&UndefinedError{PC: c.PC, Insn: i.raw})
+	raw := uint32(0)
+	if cp := c.Mem.fetchCode; cp != nil {
+		raw = cp.raw(c.PC)
+	}
+	panic(&UndefinedError{PC: c.PC, Insn: raw})
 }
 
 // ---- condition codes and flags ---------------------------------------------

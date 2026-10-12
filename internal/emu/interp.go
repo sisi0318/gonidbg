@@ -193,7 +193,14 @@ func (b *interpBackend) RestoreContext(ctx CPUContext) error {
 // needed to match the other backends' contract.
 func (b *interpBackend) FlushCache() error { b.c.Mem.DropCode(); return nil }
 
-func (b *interpBackend) Close() error { return nil }
+// Close releases the guest address space and the decoded instructions. The
+// backend stays safe to call afterwards -- every access reports unmapped
+// memory -- which is friendlier than the cgo backends, where a use after close
+// reaches a freed engine.
+func (b *interpBackend) Close() error {
+	b.c.Release()
+	return nil
+}
 
 // funcHook adapts a remover closure to HookHandle.
 type funcHook func()

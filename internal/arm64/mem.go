@@ -63,6 +63,10 @@ type (
 	ptL2 [4096]*ptL3
 )
 
+// The zero value of tlbEntry names page 0 with a nil backing array, which
+// would nil-dereference on the fast path, so Memory must not be used before
+// init has written the noVPN sentinel into every slot. CPU.New and CPU.Release
+// are the only places that build one.
 type tlbEntry struct {
 	vpn  uint64
 	data *[PageSize]byte
@@ -81,6 +85,8 @@ type memHook struct {
 	fn         MemHookFunc
 }
 
+type invalidHook struct{ fn InvalidHookFunc }
+
 // Memory is a guest address space.
 type Memory struct {
 	l1   [1 << (vpnBits - 24)]*ptL2
@@ -91,7 +97,7 @@ type Memory struct {
 	fetchVPN  uint64
 	fetchCode *codePage
 
-	invalid []InvalidHookFunc
+	invalid []*invalidHook
 	rhooks  []*memHook
 	whooks  []*memHook
 
@@ -366,7 +372,7 @@ func (m *Memory) guestPage(kind int, addr uint64, size int, value int64) *page {
 		handled := false
 		if retry == 0 {
 			for _, h := range m.invalid {
-				if h(fk, addr, size, value) {
+				if h.fn(fk, addr, size, value) {
 					handled = true
 				}
 			}
@@ -377,17 +383,9 @@ func (m *Memory) guestPage(kind int, addr uint64, size int, value int64) *page {
 	}
 }
 
-func hookHit(hs []*memHook, addr uint64) bool {
-	for _, h := range hs {
-		if h.begin > h.end || (addr >= h.begin && addr <= h.end) {
-			return true
-		}
-	}
-	return false
-}
-
 func callMemHooks(hs []*memHook, addr uint64, size int, value int64) {
 	for _, h := range hs {
+		// begin > end means everywhere, matching unicorn's bound check
 		if h.begin > h.end || (addr >= h.begin && addr <= h.end) {
 			h.fn(addr, size, value)
 		}
@@ -399,16 +397,17 @@ func (m *Memory) readSlow(addr uint64, size int) uint64 {
 	if off <= PageSize-uint64(size) {
 		vpn := addr >> PageBits
 		p := m.guestPage(MemRead, addr, size, 0)
-		data := p.data
-		if data == nil {
-			data = &zeroPage
-		}
 		if len(m.rhooks) != 0 {
 			callMemHooks(m.rhooks, addr, size, 0)
+			// The hook runs arbitrary caller code. It may have written this
+			// page for the first time -- in which case the pointer resolved
+			// above still aimed at the shared zero page and the read would
+			// return a stale zero -- or unmapped or remapped it. Resolve again.
+			p = m.guestPage(MemRead, addr, size, 0)
 		} else {
-			m.rtlb[vpn&tlbMask] = tlbEntry{vpn, data}
+			m.rtlb[vpn&tlbMask] = tlbEntry{vpn, pageData(p)}
 		}
-		return loadN(data[off:], size)
+		return loadN(pageData(p)[off:], size)
 	}
 	// crosses a page boundary: check both pages before touching anything
 	m.guestPage(MemRead, addr, size, 0)
@@ -419,11 +418,23 @@ func (m *Memory) readSlow(addr uint64, size int) uint64 {
 	var v uint64
 	for k := 0; k < size; k++ {
 		a := addr + uint64(k)
-		if d := m.lookup(a >> PageBits).data; d != nil {
-			v |= uint64(d[a&pageMask]) << (8 * k)
+		// A hook may have unmapped one of the pages after both were validated.
+		// The access is already in flight, so the byte reads as zero instead
+		// of faulting half way through.
+		if p := m.lookup(a >> PageBits); p != nil && p.data != nil {
+			v |= uint64(p.data[a&pageMask]) << (8 * k)
 		}
 	}
 	return v
+}
+
+// pageData is p's backing array, or the shared zero page when p has never been
+// written. Never write through the result.
+func pageData(p *page) *[PageSize]byte {
+	if p.data == nil {
+		return &zeroPage
+	}
+	return p.data
 }
 
 func (m *Memory) writeSlow(addr uint64, size int, v uint64) {
@@ -431,10 +442,12 @@ func (m *Memory) writeSlow(addr uint64, size int, v uint64) {
 	if off <= PageSize-uint64(size) {
 		vpn := addr >> PageBits
 		p := m.guestPage(MemWrite, addr, size, int64(v))
-		data := m.writable(vpn, p)
 		if len(m.whooks) != 0 {
 			callMemHooks(m.whooks, addr, size, int64(v))
-		} else {
+			p = m.guestPage(MemWrite, addr, size, int64(v)) // the hook may have remapped it
+		}
+		data := m.writable(vpn, p)
+		if len(m.whooks) == 0 {
 			m.wtlb[vpn&tlbMask] = tlbEntry{vpn, data}
 		}
 		storeN(data[off:], size, v)
@@ -448,7 +461,11 @@ func (m *Memory) writeSlow(addr uint64, size int, v uint64) {
 	for k := 0; k < size; k++ {
 		a := addr + uint64(k)
 		vpn := a >> PageBits
-		m.writable(vpn, m.lookup(vpn))[a&pageMask] = byte(v >> (8 * k))
+		p := m.lookup(vpn)
+		if p == nil { // unmapped by a hook mid-access; drop the byte
+			continue
+		}
+		m.writable(vpn, p)[a&pageMask] = byte(v >> (8 * k))
 	}
 }
 
@@ -579,12 +596,16 @@ func (m *Memory) checkWrite(addr uint64, size int) {
 // ---- hooks -------------------------------------------------------------------
 
 func (m *Memory) AddInvalidHook(fn InvalidHookFunc) func() {
-	m.invalid = append(m.invalid, fn)
-	idx := len(m.invalid) - 1
+	h := &invalidHook{fn}
+	m.invalid = append(m.invalid, h)
 	return func() {
-		if idx < len(m.invalid) {
-			m.invalid[idx] = func(int, uint64, int, int64) bool { return false }
+		out := make([]*invalidHook, 0, len(m.invalid))
+		for _, x := range m.invalid {
+			if x != h {
+				out = append(out, x)
+			}
 		}
+		m.invalid = out
 	}
 }
 

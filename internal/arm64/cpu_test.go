@@ -358,3 +358,129 @@ func TestDecodableRejectsUnallocated(t *testing.T) {
 		}
 	}
 }
+
+// --- regressions -----------------------------------------------------------
+
+// A misaligned PC must be rejected rather than indexing the decoded-instruction
+// array with pc>>2 while reading the encoding from byte offset pc&0xfff: that
+// combination cached a garbage decode in the slot belonging to the *aligned*
+// address, so a later legitimate execution of that address ran the wrong
+// instruction.
+func TestMisalignedPCRejected(t *testing.T) {
+	c := newTest(t, 0x91000400) // add x0,x0,#1
+	c.PC = tCode + 2
+	if err := c.Run(0, 1); err == nil {
+		t.Fatal("a misaligned PC should be an error")
+	}
+	// the aligned address must still decode correctly
+	c.PC = tCode
+	c.SetX(0, 0)
+	if err := c.Run(0, 1); err != nil {
+		t.Fatalf("aligned run after a misaligned one: %v", err)
+	}
+	if c.X(0) != 1 {
+		t.Errorf("x0 = %d, want 1 (the decode cache was poisoned)", c.X(0))
+	}
+}
+
+// The same check also guards the end of a page, where a misaligned fetch would
+// read past the page and panic with a bounds error — escaping Run's recover,
+// which only converts the CPU's own error types.
+func TestMisalignedPCAtPageEnd(t *testing.T) {
+	c := newTest(t, 0x91000400)
+	c.PC = tCode + PageSize - 2
+	if err := c.Run(0, 1); err == nil {
+		t.Fatal("a misaligned PC at a page end should be an error")
+	}
+}
+
+// A branch to a misaligned target is rejected too, via the same check.
+func TestMisalignedBranchTarget(t *testing.T) {
+	c := newTest(t, 0xd61f0020) // br x1
+	c.SetX(1, tCode+1)
+	if err := c.Run(0, 2); err == nil {
+		t.Fatal("a branch to a misaligned target should be an error")
+	}
+}
+
+// A read hook may write the page it is reporting on. The backing array has to
+// be resolved after the hook runs, or a first write inside the hook leaves the
+// read looking at the shared zero page and returning a stale zero.
+func TestReadHookWritingItsOwnPage(t *testing.T) {
+	c := newTest(t, 0xf9400020) // ldr x0,[x1]
+	target := uint64(tData + 2*PageSize)
+	c.SetX(1, target)
+	c.Mem.AddReadHook(0, ^uint64(0), func(addr uint64, size int, _ int64) {
+		if addr == target {
+			c.Mem.Write64(addr, 0x1234) // first write to this page
+		}
+	})
+	run(t, c, 1)
+	if c.X(0) != 0x1234 {
+		t.Errorf("x0 = %#x, want 0x1234 (the read used a stale page pointer)", c.X(0))
+	}
+}
+
+// A hook that unmaps the page mid-access must not crash the interpreter: the
+// access is already in flight, so the bytes read as zero.
+func TestHookUnmappingDuringAccess(t *testing.T) {
+	c := newTest(t, 0xf9400020) // ldr x0,[x1]
+	target := uint64(tData + PageSize)
+	c.SetX(1, target-3) // crosses into the next page
+	c.SetX(0, 0xffff)
+	c.Mem.AddReadHook(0, ^uint64(0), func(addr uint64, size int, _ int64) {
+		_ = c.Mem.Unmap(target, PageSize)
+	})
+	if err := c.Run(0, 1); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+// Removing an invalid-access hook really removes it.
+func TestInvalidHookRemoval(t *testing.T) {
+	c := newTest(t, 0xf9400020) // ldr x0,[x1]
+	c.SetX(1, 0x90000000)
+	calls := 0
+	rm := c.Mem.AddInvalidHook(func(int, uint64, int, int64) bool { calls++; return false })
+	c.PC = tCode
+	_ = c.Run(0, 1)
+	rm()
+	c.PC = tCode
+	_ = c.Run(0, 1)
+	if calls != 1 {
+		t.Errorf("invalid hook called %d times, want 1 (it was not removed)", calls)
+	}
+}
+
+// CNTVCT_EL0 reads the instruction count, so a restored context has to restore
+// it as well: otherwise a guest that mixes in the counter drifts between a run
+// and a run resumed from a snapshot, which is what Snapshot/Restore exists to
+// prevent.
+func TestContextRestoresGuestCounter(t *testing.T) {
+	// mrs x0,cntvct_el0
+	c := newTest(t, 0xd53be040)
+	ctx := c.SaveContext()
+	run(t, c, 1)
+	first := c.X(0)
+
+	c.RestoreContext(ctx)
+	c.SetX(0, 0)
+	run(t, c, 1)
+	if c.X(0) != first {
+		t.Errorf("cntvct after restore = %d, want %d", c.X(0), first)
+	}
+}
+
+// Release drops the address space, so a backend that has been closed cannot
+// hand back freed guest state and does not pin it either.
+func TestRelease(t *testing.T) {
+	c := newTest(t, 0x91000400)
+	c.Mem.Write64(tData, 1)
+	c.Release()
+	if c.Mem.Mapped(tData) {
+		t.Error("memory still mapped after Release")
+	}
+	if err := c.Mem.HostRead(tData, make([]byte, 8)); err == nil {
+		t.Error("a host read after Release should report unmapped memory")
+	}
+}
