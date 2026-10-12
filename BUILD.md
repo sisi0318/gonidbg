@@ -46,7 +46,8 @@ export CGO_CFLAGS_ALLOW='.*'
 
 ```bash
 GOOS=windows go build -tags unicorn ./...
-go build -tags unicorn ./cmd/ucsmoke   # cgo+unicorn 管线自检(纯 C 版已验证 add x0,#1 => 11)
+go run -tags unicorn ./cmd/ucthread    # 最小引擎自检(裸 C 线程跑 add x0,#1 => 11)
+go run -tags unicorn ./cmd/bsmoke      # 经 emu.Backend 的完整自检
 ```
 
 ### Linux 交叉编译(部署目标,推荐运行环境)

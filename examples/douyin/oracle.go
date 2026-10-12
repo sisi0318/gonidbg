@@ -218,7 +218,9 @@ func installProbe(e *emulator.Emulator, m *emulator.Module) {
 				var b []byte
 				for a := lo; a < hi; a += 0x1000 {
 					pg, e := h.Emu().ReadBytes(a, 0x1000)
-					if e != nil { pg = make([]byte, 0x1000) }
+					if e != nil {
+						pg = make([]byte, 0x1000)
+					}
 					b = append(b, pg...)
 				}
 				return b
@@ -452,7 +454,9 @@ func installProbe(e *emulator.Emulator, m *emulator.Module) {
 				var b []byte
 				for a := lo; a < hi; a += 0x1000 {
 					pg, e := h.Emu().ReadBytes(a, 0x1000)
-					if e != nil { pg = make([]byte, 0x1000) }
+					if e != nil {
+						pg = make([]byte, 0x1000)
+					}
 					b = append(b, pg...)
 				}
 				return b
@@ -491,7 +495,7 @@ func installProbe(e *emulator.Emulator, m *emulator.Module) {
 		// (sub_2a0a34): inputs at the 0x2c dispatch, outputs at the following 0x13 dispatch. This
 		// lets us model 0x2c's scatter (rf[8/0xb/0xe/0x1b/0x1e]) in pure Python.
 		if encDumped && a3 == 0x2c && !dumped2c {
-			orchCtx = h.Reg(1)   // the orchestration's ctx (0x2c is dispatched BY the orchestration)
+			orchCtx = h.Reg(1) // the orchestration's ctx (0x2c is dispatched BY the orchestration)
 			rfb, _ := h.Emu().ReadBytes(orchCtx+0x6050, 8*256)
 			_ = os.WriteFile("rf_at_2c.bin", rfb, 0644)
 			dumped2c = true
@@ -517,7 +521,9 @@ func installProbe(e *emulator.Emulator, m *emulator.Module) {
 				var b []byte
 				for a := lo; a < hi; a += 0x1000 {
 					pg, e := h.Emu().ReadBytes(a, 0x1000)
-					if e != nil { pg = make([]byte, 0x1000) }
+					if e != nil {
+						pg = make([]byte, 0x1000)
+					}
 					b = append(b, pg...)
 				}
 				return b

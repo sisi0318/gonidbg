@@ -73,11 +73,11 @@ func BenchmarkRestoreFootprint(b *testing.B) {
 	regions := []struct {
 		base, size uint64
 	}{
-		{0xC0000000, 8 << 20}, // stack
-		{0x12800000, 4 << 20}, // .data/.bss
-		{0x60000000, 1 << 20}, // stubs
+		{0xC0000000, 8 << 20},  // stack
+		{0x12800000, 4 << 20},  // .data/.bss
+		{0x60000000, 1 << 20},  // stubs
 		{0xD0000000, 64 << 10}, // tls
-		{0x30000000, 2 << 20}, // brk
+		{0x30000000, 2 << 20},  // brk
 	}
 	var total uint64
 	for _, r := range regions {

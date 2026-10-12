@@ -37,6 +37,8 @@ unidbg is the de-facto tool for emulating Android native libraries, but it runs 
 - JNI/JavaVM: a guest `JNIEnv`/`JavaVM` whose calls trap back to a Go handler you implement (`FindClass`, `GetMethodID`, `Call*Method*`, `RegisterNatives`, strings, byte arrays, …).
 - Call native functions by symbol or by module offset, pass up to 8 integer args, and read the return value.
 - Replace a native function with a Go callback (`Replace`, entry hook), or **inline hook** (`HookAddr`, per-instruction, Unicorn) to rewrite registers / redirect PC; both invalidate the code cache automatically.
+- Range and memory-access hooks: `HookRange`, `HookMemRead`, `HookMemWrite` (Unicorn).
+- **Snapshot / restore**: take a `Snapshot` once after init, then `Restore` before each reused call to rewind CPU, writable memory and brk to a pristine state (for pooled sign services).
 - **Console debugger**: breakpoints / single-step / registers / memory (Unicorn; I/O is injectable for scripting).
 - Load **real class/method/field metadata from a classes.dex** (`Config.DexPath` / `LoadDex`): FindClass/GetMethodID/GetFieldID resolve against true signatures and superclasses (metadata only, no bytecode).
 - Memory helpers: alloc, read/write bytes, C-strings, and LE integers.

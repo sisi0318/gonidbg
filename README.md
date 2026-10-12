@@ -37,6 +37,8 @@ unidbg 是模拟 Android native 库的事实标准,但它跑在 JVM 上,依赖�
 - JNI/JavaVM:guest 的 `JNIEnv`/`JavaVM` 调用会陷回到你用 Go 实现的处理器(`FindClass`、`GetMethodID`、`Call*Method*`、`RegisterNatives`、字符串、字节数组等)。
 - 按符号名或按模块偏移调用 native 函数,最多 8 个整型参数,可读取返回值。
 - 用 Go 回调替换 native 函数(`Replace`,入口 hook),或**内联 hook**(`HookAddr`,逐指令,Unicorn)改寄存器 / 重定向 PC;均自动让代码缓存失效。
+- 区间指令 hook 与内存访问 hook:`HookRange`、`HookMemRead`、`HookMemWrite`(Unicorn)。
+- **快照 / 回滚**:`Snapshot` 在初始化后存一次,`Restore` 在每次复用调用前把 CPU、可写内存、brk 恢复到干净状态,适合池化的签名服务。
 - **控制台调试器**:断点 / 单步 / 寄存器 / 内存(Unicorn,I/O 可注入便于脚本化)。
 - 从 **classes.dex 加载真实类/方法/字段元数据**(`Config.DexPath` / `LoadDex`):FindClass/GetMethodID/GetFieldID 按真实签名、父类解析(仅元数据,不执行字节码)。
 - 内存助手:分配、读写字节、C 字符串、小端整数。
