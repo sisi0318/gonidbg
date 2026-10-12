@@ -208,13 +208,16 @@ func decodeFP(in *inst, raw uint32) {
 		return
 	}
 	ft := int((raw >> 22) & 3)
-	if ft == 2 {
-		return
-	}
-	// Half-precision arithmetic is FEAT_FP16, which the CPU this interpreter
-	// models does not have: only FCVT converts to and from half. Everything
-	// else with type == 11 is undefined here.
+	// Type 10 is unallocated in every group here *except* the two FMOV forms
+	// that move the high half of a vector register to or from a general
+	// register, which live in the integer-conversion group at the bottom.
+	// Rejecting it outright made those two unreachable — and they are not
+	// exotic: the bundled libm uses them several hundred times.
+	//
+	// Half precision is FEAT_FP16, which the CPU this interpreter models does
+	// not have, so type 11 is only allowed as an FCVT operand.
 	half := ft == ftHalf
+	wide := ft == 2
 	in.sz = uint8(ft)
 	in.rd, in.rn, in.rm = uint8(raw&31), uint8((raw>>5)&31), uint8((raw>>16)&31)
 	// Dispatch follows the encoding table exactly: bits 11:10 pick the group,
@@ -223,7 +226,7 @@ func decodeFP(in *inst, raw uint32) {
 	// unallocated encodings that a real engine rejects.
 	switch (raw >> 10) & 3 {
 	case 1: // FP conditional compare (bit 4 picks FCCMP vs FCCMPE, same NZCV)
-		if m != 0 || half {
+		if m != 0 || half || wide {
 			return
 		}
 		in.cond = uint8((raw >> 12) & 15)
@@ -231,13 +234,13 @@ func decodeFP(in *inst, raw uint32) {
 		in.fn = opFccmp
 	case 2: // FP data-processing (2 source)
 		opcode := (raw >> 12) & 15
-		if m != 0 || half || opcode > 8 {
+		if m != 0 || half || wide || opcode > 8 {
 			return
 		}
 		in.imm = uint64(opcode)
 		in.fn = opFP2
 	case 3: // FP conditional select
-		if m != 0 || half {
+		if m != 0 || half || wide {
 			return
 		}
 		in.cond = uint8((raw >> 12) & 15)
@@ -245,13 +248,13 @@ func decodeFP(in *inst, raw uint32) {
 	case 0:
 		switch {
 		case (raw>>12)&1 == 1: // FP immediate
-			if m != 0 || half || (raw>>5)&31 != 0 {
+			if m != 0 || half || wide || (raw>>5)&31 != 0 {
 				return
 			}
 			in.imm = vfpExpandImm(uint64((raw>>13)&0xff), ft)
 			in.fn = opFmovImm
 		case (raw>>13)&1 == 1: // FP compare
-			if m != 0 || half || (raw>>14)&3 != 0 || raw&7 != 0 {
+			if m != 0 || half || wide || (raw>>14)&3 != 0 || raw&7 != 0 {
 				return
 			}
 			in.sh = uint8((raw >> 3) & 1) // compare against zero
@@ -263,14 +266,14 @@ func decodeFP(in *inst, raw uint32) {
 			opcode := (raw >> 15) & 63
 			if opcode>>2 == 1 { // FCVT between FP types
 				dst := int(opcode & 3)
-				if dst == 2 || dst == ft {
+				if dst == 2 || dst == ft || wide {
 					return
 				}
 				in.sh = uint8(dst)
 				in.fn = opFcvtFP
 				return
 			}
-			if half {
+			if half || wide {
 				return
 			}
 			switch opcode {
@@ -591,30 +594,34 @@ func fma(a, b, acc float64, o fpOps) float64 {
 func decodeFPInt(in *inst, raw uint32, ft int) {
 	sf, rmode, opcode := (raw>>31)&1, (raw>>19)&3, (raw>>16)&7
 	in.sh = uint8(sf)
+	// FMOV between a general register and a scalar: 32-bit with single
+	// precision, 64-bit with double. The high-half forms below are the only
+	// place type 10 is allowed.
+	plainFmov := (sf == 0 && ft == ftSingle) || (sf == 1 && ft == ftDouble)
 	switch rmode<<3 | opcode {
-	case 0b00110: // FMOV (to general)
-		if (ft == ftSingle) != (sf == 0) {
+	case 0b00110: // FMOV Wd/Xd <- Sn/Dn
+		if !plainFmov {
 			return
 		}
 		in.rd = xw(raw)
 		in.fn = opFmovToGen
 		return
-	case 0b00111: // FMOV (from general)
-		if (ft == ftSingle) != (sf == 0) {
+	case 0b00111: // FMOV Sd/Dd <- Wn/Xn
+		if !plainFmov {
 			return
 		}
 		in.rn = xr(raw >> 5)
 		in.fn = opFmovFromGen
 		return
-	case 0b01110: // FMOV Xd, Vn.D[1]
-		if ft != 2 || sf == 0 {
+	case 0b01110: // FMOV Xd <- Vn.D[1]
+		if sf == 0 || ft != 2 {
 			return
 		}
 		in.rd = xw(raw)
 		in.fn = opFmovToGenHi
 		return
-	case 0b01111: // FMOV Vd.D[1], Xn
-		if ft != 2 || sf == 0 {
+	case 0b01111: // FMOV Vd.D[1] <- Xn
+		if sf == 0 || ft != 2 {
 			return
 		}
 		in.rn = xr(raw >> 5)

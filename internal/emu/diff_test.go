@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/sisi0318/gonidbg/internal/arm64"
@@ -428,4 +430,133 @@ func TestDiffUnicorn(t *testing.T) {
 	if failures > 20 {
 		t.Errorf("%d mismatches total (only the first 20 shown)", failures)
 	}
+}
+
+// TestCoverageGap answers the question the differential test structurally
+// cannot: which instructions does unicorn implement that this interpreter
+// refuses?
+//
+// TestDiffUnicorn only ever offers encodings the interpreter accepts, so it
+// proves what is accepted is computed correctly and is blind to what is
+// missing. A census against one real library covers that from the other side,
+// but only for the instructions that library happens to use. This samples the
+// encoding space instead: take random words the decoder rejects, run each on
+// unicorn, and see whether unicorn considers it undefined too.
+//
+// unicorn reports an undefined instruction by calling the interrupt hook with
+// QEMU's EXCP_UDEF, which is how "unicorn also rejects it" is detected here;
+// anything else means unicorn ran it and we would not have.
+//
+//	go test -tags unicorn -run TestCoverageGap ./internal/emu
+//	GONIDBG_GAP_N=200000 go test -tags unicorn -run TestCoverageGap ./internal/emu
+func TestCoverageGap(t *testing.T) {
+	const excpUDEF = 1
+
+	n := 20000
+	if s := os.Getenv("GONIDBG_GAP_N"); s != "" {
+		v, err := strconv.Atoi(s)
+		if err != nil {
+			t.Fatalf("GONIDBG_GAP_N: %v", err)
+		}
+		n = v
+	}
+	if testing.Short() {
+		n = 1000
+	}
+
+	ref := newDiffEngine(t, "unicorn")
+	defer ref.b.Close()
+
+	var lastIntno uint32
+	var sawIntr bool
+	if _, err := ref.b.HookInterrupt(func(b Backend, intno uint32) {
+		lastIntno, sawIntr = intno, true
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rng := rand.New(rand.NewPCG(7, 0x2545f4914f6cdd1d))
+	st := randomState(rng)
+
+	tested, gaps := 0, 0
+	var gapList []uint32
+	byFamily := map[string]int{}
+	examples := map[string]uint32{}
+	for tested < n {
+		insn := rng.Uint32()
+		if arm64.Decodable(insn) || excluded(insn) {
+			continue // only the encodings this interpreter refuses
+		}
+		tested++
+
+		// Set up the same state the differential test uses, so a rejection is
+		// about the encoding and not about registers pointing somewhere odd.
+		if _, err := ref.run(st, 0xd503201f); err != nil { // nop, to reset
+			t.Fatal(err)
+		}
+		var ib [4]byte
+		binary.LittleEndian.PutUint32(ib[:], insn)
+		if err := ref.b.MemWrite(dTest, ib[:]); err != nil {
+			t.Fatal(err)
+		}
+		sawIntr, lastIntno = false, 0
+		_ = ref.b.StartCount(dTest, 0, 1)
+		if sawIntr && lastIntno == excpUDEF {
+			continue // unicorn rejects it too: no gap
+		}
+		gaps++
+		fam := family(insn)
+		byFamily[fam]++
+		if _, ok := examples[fam]; !ok {
+			examples[fam] = insn
+		}
+		gapList = append(gapList, insn)
+	}
+
+	t.Logf("sampled %d encodings this interpreter rejects; unicorn ran %d of them (%.2f%%)",
+		tested, gaps, 100*float64(gaps)/float64(tested))
+	type kv struct {
+		k string
+		n int
+	}
+	var all []kv
+	for k, v := range byFamily {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].n > all[j].n })
+	for _, e := range all {
+		t.Logf("  %-34s %6d  e.g. %#08x", e.k, e.n, examples[e.k])
+	}
+	// GONIDBG_GAP_OUT dumps the encodings so they can be disassembled offline,
+	// which is how the gap gets turned into a list of instruction names.
+	if out := os.Getenv("GONIDBG_GAP_OUT"); out != "" {
+		var b strings.Builder
+		for _, w := range gapList {
+			fmt.Fprintf(&b, "%08x\n", w)
+		}
+		if err := os.WriteFile(out, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %d encodings to %s", len(gapList), out)
+	}
+}
+
+// family labels an encoding by its top-level group, so the gap report says
+// which parts of the architecture are missing rather than listing raw words.
+func family(raw uint32) string {
+	switch {
+	case raw&0x1e000000 == 0x02000000:
+		return "SVE / unallocated(op0=0010)"
+	case raw&0x1f000000 == 0x11000000 || raw&0x1f000000 == 0x13000000:
+		return "data-processing immediate"
+	case raw&0x1c000000 == 0x14000000:
+		return "branch / exception / system"
+	case raw&0x0a000000 == 0x08000000:
+		return "load/store"
+	case raw&0x0e000000 == 0x0a000000:
+		return "data-processing register"
+	case raw&0x0e000000 == 0x0e000000:
+		return "SIMD / floating point"
+	}
+	return "other"
 }
