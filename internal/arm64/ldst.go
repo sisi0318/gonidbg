@@ -1,5 +1,7 @@
 package arm64
 
+import "encoding/binary"
+
 // ---- loads and stores ------------------------------------------------------
 
 // Addressing modes, kept in inst.cond.
@@ -157,6 +159,19 @@ func (in *inst) setLdSt(raw uint32, vec, load bool) {
 	} else {
 		in.rd = xr(raw)
 	}
+	if !vec {
+		var fn func(*CPU, *inst)
+		switch in.cond {
+		case modeOff:
+			fn = hotLdSt(load, int(in.sz), in.sh)
+		case modeReg:
+			fn = hotLdStReg(load, int(in.sz), in.sh)
+		}
+		if fn != nil {
+			in.fn = fn
+			return
+		}
+	}
 	switch {
 	case vec && load:
 		in.fn = [4]func(*CPU, *inst){opVLoadOff, opVLoadWb, opVLoadWb, opVLoadReg}[in.cond]
@@ -250,9 +265,17 @@ func decodePair(in *inst, raw uint32) {
 	case vec:
 		in.fn = opVStorePair
 	case l:
-		in.fn = opLoadPair
+		if bytes == 8 && in.cond == modeOff && in.sh == extZero {
+			in.fn = opLdp64Off
+		} else {
+			in.fn = opLoadPair
+		}
 	default:
-		in.fn = opStorePair
+		if bytes == 8 && in.cond == modeOff {
+			in.fn = opStp64Off
+		} else {
+			in.fn = opStorePair
+		}
 	}
 }
 
@@ -771,5 +794,227 @@ func opSIMDStoreMulti(c *CPU, i *inst) {
 		}
 	}
 	c.simdAdvance(i, base, total)
+	c.PC += 4
+}
+
+// ---- specialised hot paths -------------------------------------------------
+//
+// A census of one production library's 51M executed instructions put LDR at
+// 23% and STR at 8% of everything, almost all of it the plain
+// base-plus-immediate form. The generic handlers reach memory through
+// ldInt -> ReadN -> Read64, none of which Go will inline (each is past the
+// inlining budget), so the commonest instruction in the workload paid three
+// calls plus a switch on the access size and another on the extension. These
+// specialisations resolve both switches at decode time and carry the TLB fast
+// path inline, leaving one call.
+
+func opLdr64Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-8 {
+		c.R[i.rd] = binary.LittleEndian.Uint64(e.data[a&pageMask:])
+	} else {
+		c.R[i.rd] = c.Mem.readSlow(a, 8)
+	}
+	c.PC += 4
+}
+
+func opLdr32Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-4 {
+		c.R[i.rd] = uint64(binary.LittleEndian.Uint32(e.data[a&pageMask:]))
+	} else {
+		c.R[i.rd] = c.Mem.readSlow(a, 4)
+	}
+	c.PC += 4
+}
+
+func opLdrb64Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits {
+		c.R[i.rd] = uint64(e.data[a&pageMask])
+	} else {
+		c.R[i.rd] = c.Mem.readSlow(a, 1)
+	}
+	c.PC += 4
+}
+
+func opStr64Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-8 {
+		binary.LittleEndian.PutUint64(e.data[a&pageMask:], c.R[i.rd])
+	} else {
+		c.Mem.writeSlow(a, 8, c.R[i.rd])
+	}
+	c.PC += 4
+}
+
+func opStr32Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-4 {
+		binary.LittleEndian.PutUint32(e.data[a&pageMask:], uint32(c.R[i.rd]))
+	} else {
+		c.Mem.writeSlow(a, 4, c.R[i.rd])
+	}
+	c.PC += 4
+}
+
+func opStrb64Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits {
+		e.data[a&pageMask] = byte(c.R[i.rd])
+	} else {
+		c.Mem.writeSlow(a, 1, c.R[i.rd])
+	}
+	c.PC += 4
+}
+
+// hotLdSt returns the specialised handler for an integer base-plus-immediate
+// access, or nil when the generic one has to be used.
+func hotLdSt(load bool, size int, ext uint8) func(*CPU, *inst) {
+	if ext != extZero {
+		return nil
+	}
+	if load {
+		switch size {
+		case 8:
+			return opLdr64Off
+		case 4:
+			return opLdr32Off
+		case 1:
+			return opLdrb64Off
+		}
+		return nil
+	}
+	switch size {
+	case 8:
+		return opStr64Off
+	case 4:
+		return opStr32Off
+	case 1:
+		return opStrb64Off
+	}
+	return nil
+}
+
+// Register-offset loads and stores. The obfuscated library this interpreter was
+// tuned against reaches memory through a base plus a scaled index constantly
+// (its dispatch tables), so these were 11% of total run time before being
+// specialised.
+
+func opLdr64Reg(c *CPU, i *inst) {
+	a := c.R[i.rn] + extend(c.R[i.rm], i.ra)<<i.amt
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-8 {
+		c.R[i.rd] = binary.LittleEndian.Uint64(e.data[a&pageMask:])
+	} else {
+		c.R[i.rd] = c.Mem.readSlow(a, 8)
+	}
+	c.PC += 4
+}
+
+func opLdr32Reg(c *CPU, i *inst) {
+	a := c.R[i.rn] + extend(c.R[i.rm], i.ra)<<i.amt
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-4 {
+		c.R[i.rd] = uint64(binary.LittleEndian.Uint32(e.data[a&pageMask:]))
+	} else {
+		c.R[i.rd] = c.Mem.readSlow(a, 4)
+	}
+	c.PC += 4
+}
+
+func opLdrb64Reg(c *CPU, i *inst) {
+	a := c.R[i.rn] + extend(c.R[i.rm], i.ra)<<i.amt
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits {
+		c.R[i.rd] = uint64(e.data[a&pageMask])
+	} else {
+		c.R[i.rd] = c.Mem.readSlow(a, 1)
+	}
+	c.PC += 4
+}
+
+func opStr64Reg(c *CPU, i *inst) {
+	a := c.R[i.rn] + extend(c.R[i.rm], i.ra)<<i.amt
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-8 {
+		binary.LittleEndian.PutUint64(e.data[a&pageMask:], c.R[i.rd])
+	} else {
+		c.Mem.writeSlow(a, 8, c.R[i.rd])
+	}
+	c.PC += 4
+}
+
+func opStr32Reg(c *CPU, i *inst) {
+	a := c.R[i.rn] + extend(c.R[i.rm], i.ra)<<i.amt
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-4 {
+		binary.LittleEndian.PutUint32(e.data[a&pageMask:], uint32(c.R[i.rd]))
+	} else {
+		c.Mem.writeSlow(a, 4, c.R[i.rd])
+	}
+	c.PC += 4
+}
+
+func opStrb64Reg(c *CPU, i *inst) {
+	a := c.R[i.rn] + extend(c.R[i.rm], i.ra)<<i.amt
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits {
+		e.data[a&pageMask] = byte(c.R[i.rd])
+	} else {
+		c.Mem.writeSlow(a, 1, c.R[i.rd])
+	}
+	c.PC += 4
+}
+
+// hotLdStReg is hotLdSt for the register-offset form.
+func hotLdStReg(load bool, size int, ext uint8) func(*CPU, *inst) {
+	if ext != extZero {
+		return nil
+	}
+	if load {
+		switch size {
+		case 8:
+			return opLdr64Reg
+		case 4:
+			return opLdr32Reg
+		case 1:
+			return opLdrb64Reg
+		}
+		return nil
+	}
+	switch size {
+	case 8:
+		return opStr64Reg
+	case 4:
+		return opStr32Reg
+	case 1:
+		return opStrb64Reg
+	}
+	return nil
+}
+
+// A 64-bit pair fits in one page almost always, so checking the whole 16 bytes
+// against the TLB once replaces a page-table walk plus two sized reads.
+
+func opLdp64Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.rtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-16 {
+		off := a & pageMask
+		c.R[i.rd] = binary.LittleEndian.Uint64(e.data[off:])
+		c.R[i.ra] = binary.LittleEndian.Uint64(e.data[off+8:])
+	} else {
+		c.Mem.guestPage(MemRead, a, 16, 0)
+		c.R[i.rd] = c.Mem.Read64(a)
+		c.R[i.ra] = c.Mem.Read64(a + 8)
+	}
+	c.PC += 4
+}
+
+func opStp64Off(c *CPU, i *inst) {
+	a := c.R[i.rn] + i.imm
+	if e := &c.Mem.wtlb[(a>>PageBits)&tlbMask]; e.vpn == a>>PageBits && a&pageMask <= PageSize-16 {
+		off := a & pageMask
+		binary.LittleEndian.PutUint64(e.data[off:], c.R[i.rd])
+		binary.LittleEndian.PutUint64(e.data[off+8:], c.R[i.ra])
+	} else {
+		c.Mem.checkWrite(a, 16)
+		c.Mem.Write64(a, c.R[i.rd])
+		c.Mem.Write64(a+8, c.R[i.ra])
+	}
 	c.PC += 4
 }

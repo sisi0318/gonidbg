@@ -135,12 +135,12 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 
 | 引擎 | 构建标签 | 链接方式 | 速度(热路径) | 许可证 |
 |---|---|---|---|---|
-| **interp**(纯 Go) | 无,始终可用 | **无依赖**(纯 Go,无 cgo) | ~13 ms/次 | Apache-2.0 |
+| **interp**(纯 Go) | 无,始终可用 | **无依赖**(纯 Go,无 cgo) | ~10 ms/次 | Apache-2.0 |
 | **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | ~13 ms/次 | GPLv2 |
 | **dynarmic** | `-tags dynarmic` | **静态链接**(C++ via zig) | ~2–4 ms/次 | 0BSD |
 
 - 引擎可以同时编进一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine interp …` 或 `GONIDBG_ENGINE=interp`。没有任何标签时只有 `interp`,它也是这时的默认;装了 Unicorn 则优先用 Unicorn(久经验证)。
-- 上表的"速度"是在一个真实的生产混淆 `.so` 上测的一次签名调用(约 290 万条指令,复用同一个模拟器)。纯 Go 解释器和 Unicorn 基本同速,而且**冷启动快一个数量级**(约 9 ms vs 144 ms),因为没有 JIT 预热、也不用加载动态库。
+- 上表的"速度"是在一个真实的生产混淆 `.so` 上测的一次签名调用(约 290 万条指令,复用同一个模拟器)。纯 Go 解释器比 Unicorn **快约 30%**,而且**冷启动快一个数量级**(约 9 ms vs 120 ms),因为没有 JIT 预热、也不用加载动态库。基准测试见 `internal/arm64/bench_test.go`(`go test -run X -bench . ./internal/arm64`)。
 - 纯 Go 引擎还顺带解决了几个 cgo 带来的麻烦:不需要 Windows 上的专属引擎线程,逐指令 hook 和 trace 只是普通 Go 函数调用(很便宜),写入代码页会自动让已解码的指令失效,所以自修改代码不需要手动刷缓存。
 - 许可证提示:Unicorn 是 GPLv2,静态链接它会让整个二进制都变成 GPLv2,所以 gonidbg 把它放在运行时 `dlopen` 的边界之后。dynarmic 是 0BSD(宽松许可),静态链接 dynarmic 不会带来 copyleft 牵连。纯 Go 的 `interp` 就是本仓库代码,Apache-2.0,没有任何 copyleft 牵连。dynarmic 的构建见 [BUILD.md](BUILD.md)。
 
@@ -148,7 +148,7 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 
 一个自己写的 CPU 最大的风险是"算错了但不报错"。所以 `interp` 是对着 Unicorn 逐条校准出来的:
 
-- **差分测试**(`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`):随机取指令编码,在两个引擎上从同一份随机初始状态执行**一条**指令,然后比对 34 个通用寄存器、全部 32 个向量寄存器和被访问的内存页。向量寄存器不需要额外的后端 API —— 用一段前导代码把 V0..V31 从内存装进来、用一段尾随代码再写回去,整个寄存器文件就都经由内存可见了。目前随机采样 150 万条指令零差异。
+- **差分测试**(`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`):随机取指令编码,在两个引擎上从同一份随机初始状态执行**一条**指令,然后比对 34 个通用寄存器、全部 32 个向量寄存器和被访问的内存页。向量寄存器不需要额外的后端 API —— 用一段前导代码把 V0..V31 从内存装进来、用一段尾随代码再写回去,整个寄存器文件就都经由内存可见了。目前随机采样 300 万条以上指令零差异。
 - **真实负载**:对那个生产 `.so` 做完整签名,X-Argus / X-Gorgon / X-Ladon 等 8 个签名头与 Unicorn **逐字节一致**;静态统计也确认它执行到的 5100 万条指令(39891 种不同编码)全部被解码器覆盖。
 - 差分测试只能验证"我接受的指令算得对不对",没法发现"我漏了哪条指令"——后者是靠真实负载和那份编码统计兜住的。
 

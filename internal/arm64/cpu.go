@@ -212,6 +212,13 @@ type cpuError struct{ msg string }
 
 func (e *cpuError) Error() string { return e.msg }
 
+// stopSignal unwinds a Stop that was requested from inside an exception hook.
+// Raising it there, rather than having the run loop test the flag on every
+// instruction, keeps the hot path free of the check: the hooks that stop
+// execution — a guest exit_group, the scheduler preempting a fiber, a
+// breakpoint — are rare, and a panic costs nothing until one fires.
+type stopSignal struct{}
+
 // Run executes from PC until PC == until (checked before each instruction),
 // count instructions have retired (count > 0), Stop is called, or an error
 // (memory fault, undefined instruction) occurs.
@@ -226,6 +233,8 @@ func (c *CPU) Run(until, count uint64) (err error) {
 				err = e
 			case *cpuError:
 				err = e
+			case stopSignal:
+				err = nil
 			default:
 				panic(r)
 			}
@@ -237,40 +246,65 @@ func (c *CPU) Run(until, count uint64) (err error) {
 	}
 	m := &c.Mem
 	for {
-		pc := c.PC
-		if pc == until || c.icount >= limit || c.stopReq.Load() {
+		// Reading the stop flag is an atomic load, which measured at ~7% of
+		// total run time when paid per instruction, so it is amortised over a
+		// batch instead. Stops that have to be prompt still are: an exception
+		// hook unwinds through stopSignal and a code hook is checked below. A
+		// Stop from a memory hook or from another goroutine takes effect
+		// within one batch.
+		if c.stopReq.Load() {
 			return nil
 		}
-		// The decoded-instruction array is indexed by pc>>2 while the encoding
-		// is read from byte offset pc&0xfff, so a misaligned PC would cache a
-		// garbage decode in the slot belonging to the aligned address (making a
-		// valid instruction fail later) and, near a page end, index past the
-		// page. PC can be set from outside (CallOffset, Hook.SetPC,
-		// RestoreContext) as well as by a branch, so this is checked here
-		// rather than at each of those.
-		if pc&3 != 0 {
-			return &cpuError{fmt.Sprintf("misaligned instruction address 0x%x", pc)}
+		batch := c.icount + stopCheckBatch
+		if batch > limit {
+			batch = limit
 		}
-		if len(c.codeHooks) != 0 {
-			c.callCodeHooks(pc)
-			if c.stopReq.Load() {
+		for c.icount < batch {
+			pc := c.PC
+			if pc == until {
 				return nil
 			}
-			if c.PC != pc {
-				continue
+			// One test covers both the alignment check and the fetch-cache
+			// check. Alignment has to be checked per instruction because PC can
+			// be set from outside (CallOffset, Hook.SetPC, RestoreContext) as
+			// well as by a branch: the decoded-instruction array is indexed by
+			// pc>>2 while the encoding is read from byte offset pc&0xfff, so a
+			// misaligned PC would cache a garbage decode in the slot belonging
+			// to the aligned address and, near a page end, index past the page.
+			if (pc&3)|((pc>>PageBits)^m.fetchVPN) != 0 {
+				if pc&3 != 0 {
+					return &cpuError{fmt.Sprintf("misaligned instruction address 0x%x", pc)}
+				}
+				c.fetch(pc)
 			}
+			if len(c.codeHooks) != 0 {
+				c.callCodeHooks(pc)
+				if c.stopReq.Load() {
+					return nil
+				}
+				if c.PC != pc {
+					continue
+				}
+				// the hook may have invalidated the fetch cache
+				if pc>>PageBits != m.fetchVPN {
+					c.fetch(pc)
+				}
+			}
+			in := &m.fetchCode.insts[(pc>>2)&(PageSize/4-1)]
+			if in.fn == nil {
+				decodeAt(in, m.fetchCode, pc)
+			}
+			in.fn(c, in)
+			c.icount++
 		}
-		if pc>>PageBits != m.fetchVPN {
-			c.fetch(pc)
+		if c.icount >= limit {
+			return nil
 		}
-		in := &m.fetchCode.insts[(pc>>2)&(PageSize/4-1)]
-		if in.fn == nil {
-			decodeAt(in, m.fetchCode, pc)
-		}
-		in.fn(c, in)
-		c.icount++
 	}
 }
+
+// stopCheckBatch is how many instructions run between reads of the stop flag.
+const stopCheckBatch = 512
 
 func (c *CPU) callCodeHooks(pc uint64) {
 	for _, h := range c.codeHooks {
@@ -285,6 +319,10 @@ func (c *CPU) callCodeHooks(pc uint64) {
 func (c *CPU) fetch(pc uint64) {
 	m := &c.Mem
 	vpn := pc >> PageBits
+	if e := &m.ctlb[vpn&ctlbMask]; e.vpn == vpn {
+		m.fetchVPN, m.fetchCode = vpn, e.code
+		return
+	}
 	p := m.guestPage(MemFetch, pc, 4, 0)
 	if p.code == nil {
 		p.code = &codePage{pg: p}
@@ -292,6 +330,7 @@ func (c *CPU) fetch(pc uint64) {
 			e.vpn = noVPN // stores to this page must now drop the decoded code
 		}
 	}
+	m.ctlb[vpn&ctlbMask] = codeEntry{vpn, p.code}
 	m.fetchVPN, m.fetchCode = vpn, p.code
 }
 
@@ -304,6 +343,12 @@ func (c *CPU) raise(intno uint32) {
 		h.fn(intno)
 	}
 	c.Mem.fetchVPN = noVPN // the hook may have remapped or rewritten code
+	if c.stopReq.Load() {
+		// The hook asked to stop. Unwind now so it takes effect before the
+		// next instruction: a BRK leaves PC on itself, so merely returning
+		// would re-execute it until the batch ran out.
+		panic(stopSignal{})
+	}
 }
 
 // codePage holds the decoded instructions of one executable page.

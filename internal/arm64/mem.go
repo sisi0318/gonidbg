@@ -30,10 +30,12 @@ const (
 	ProtExec  = 4
 	ProtAll   = ProtRead | ProtWrite | ProtExec
 
-	vpnBits = 48 - PageBits
-	tlbSize = 256
-	tlbMask = tlbSize - 1
-	noVPN   = ^uint64(0)
+	vpnBits  = 48 - PageBits
+	tlbSize  = 256
+	tlbMask  = tlbSize - 1
+	ctlbSize = 64
+	ctlbMask = ctlbSize - 1
+	noVPN    = ^uint64(0)
 )
 
 // Memory access kinds, numbered like Unicorn's uc_mem_type so hook callbacks
@@ -72,6 +74,11 @@ type tlbEntry struct {
 	data *[PageSize]byte
 }
 
+type codeEntry struct {
+	vpn  uint64
+	code *codePage
+}
+
 // MemHookFunc observes a valid guest access. value is the data being stored
 // (writes only).
 type MemHookFunc func(addr uint64, size int, value int64)
@@ -96,6 +103,11 @@ type Memory struct {
 	// fetch cache: the code page the CPU is executing from (see CPU.Run).
 	fetchVPN  uint64
 	fetchCode *codePage
+	// ctlb maps recently executed page numbers to their decoded instructions.
+	// Code that jumps between pages constantly — an obfuscated dispatch loop,
+	// say — would otherwise walk the page table on every page change, which
+	// measured at 4% of run time.
+	ctlb [ctlbSize]codeEntry
 
 	invalid []*invalidHook
 	rhooks  []*memHook
@@ -113,6 +125,9 @@ func (m *Memory) flushTLB() {
 	for i := range m.rtlb {
 		m.rtlb[i].vpn = noVPN
 		m.wtlb[i].vpn = noVPN
+	}
+	for i := range m.ctlb {
+		m.ctlb[i] = codeEntry{vpn: noVPN}
 	}
 	m.fetchVPN = noVPN
 	m.fetchCode = nil
@@ -249,6 +264,11 @@ func (m *Memory) writable(vpn uint64, p *page) *[PageSize]byte {
 
 func (m *Memory) dropCode(vpn uint64, p *page) {
 	p.code = nil
+	// The cache holds the codePage pointer, which would otherwise keep serving
+	// the instructions just invalidated.
+	if e := &m.ctlb[vpn&ctlbMask]; e.vpn == vpn {
+		*e = codeEntry{vpn: noVPN}
+	}
 	if m.fetchVPN == vpn {
 		m.fetchVPN = noVPN
 		m.fetchCode = nil
@@ -271,6 +291,9 @@ func (m *Memory) DropCode() {
 				}
 			}
 		}
+	}
+	for i := range m.ctlb {
+		m.ctlb[i] = codeEntry{vpn: noVPN}
 	}
 	m.fetchVPN = noVPN
 	m.fetchCode = nil

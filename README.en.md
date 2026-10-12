@@ -133,12 +133,12 @@ This is how unidbg's `AbstractJni` works: the guest's `RegisterNatives`/`GetMeth
 
 | engine | build tag | linkage | speed (warm) | license |
 |---|---|---|---|---|
-| **interp** (pure Go) | none, always available | **no dependency** (pure Go, no cgo) | ~13 ms/call | Apache-2.0 |
+| **interp** (pure Go) | none, always available | **no dependency** (pure Go, no cgo) | ~10 ms/call | Apache-2.0 |
 | **Unicorn2** | `-tags unicorn` | runtime `dlopen` of libunicorn | ~13 ms/call | GPLv2 |
 | **dynarmic** | `-tags dynarmic` | **static** (C++ via zig) | ~2–4 ms/call | 0BSD |
 
 - Build several into one binary (`-tags "unicorn dynarmic"`) and pick at runtime: `gonidbg -engine interp …` or `GONIDBG_ENGINE=interp`. With no tags you get `interp` alone, and it is the default; with Unicorn present, Unicorn wins (it is the long-proven one).
-- The speeds above are one sign call on a real production obfuscated `.so` (~2.9M instructions, reusing the emulator). The pure-Go interpreter is on par with Unicorn and starts an order of magnitude faster (~9 ms vs ~144 ms), since there is no JIT warm-up and no shared library to load.
+- The speeds above are one sign call on a real production obfuscated `.so` (~2.9M instructions, reusing the emulator). The pure-Go interpreter is about 30% faster than Unicorn there and starts an order of magnitude faster (~9 ms vs ~120 ms), since there is no JIT warm-up and no shared library to load. Benchmarks live in `internal/arm64/bench_test.go` (`go test -run X -bench . ./internal/arm64`).
 - The pure-Go engine also removes a few cgo headaches: no dedicated engine thread on Windows, per-instruction hooks and tracing are ordinary Go calls (so they are cheap), and writing to a code page invalidates its decoded instructions automatically — self-modifying code needs no explicit cache flush.
 - Licensing note: Unicorn is GPLv2, and statically linking it would make the combined binary GPLv2, so gonidbg keeps it behind a runtime `dlopen` boundary. dynarmic is 0BSD (permissive), so the static dynarmic build has no copyleft entanglement. The pure-Go `interp` is this repository's own code under Apache-2.0, with no entanglement at all. See [BUILD.md](BUILD.md) for building dynarmic.
 
@@ -146,7 +146,7 @@ This is how unidbg's `AbstractJni` works: the guest's `RegisterNatives`/`GetMeth
 
 The real risk in writing your own CPU is being quietly wrong, so `interp` was calibrated against Unicorn instruction by instruction:
 
-- **Differential test** (`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`): take a random instruction encoding, execute exactly one instruction on both engines from the same random starting state, then compare all 34 general-purpose registers, all 32 vector registers, and the memory pages touched. Observing the vector registers needs no extra backend API — a preamble loads V0..V31 from guest memory and a postamble stores them back, so the whole register file travels through memory both engines expose. 1.5M sampled instructions currently agree exactly.
+- **Differential test** (`go test -tags unicorn -run TestDiffUnicorn ./internal/emu`): take a random instruction encoding, execute exactly one instruction on both engines from the same random starting state, then compare all 34 general-purpose registers, all 32 vector registers, and the memory pages touched. Observing the vector registers needs no extra backend API — a preamble loads V0..V31 from guest memory and a postamble stores them back, so the whole register file travels through memory both engines expose. Over 3M sampled instructions currently agree exactly.
 - **Real workload**: a full signature run on that production `.so` reproduces all 8 X-* headers (X-Argus, X-Gorgon, X-Ladon, …) **byte-for-byte** against Unicorn, and a static census confirms the decoder covers every one of the 51M instructions it executes (39,891 distinct encodings).
 - Note the division of labour: the differential test can only prove that the instructions this decoder *accepts* compute the right answer. It cannot reveal a *missing* instruction, because an encoding the decoder refuses is never offered as a test case — that gap is covered by the real workload and the encoding census.
 
