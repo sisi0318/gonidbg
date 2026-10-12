@@ -135,12 +135,12 @@ e, _ := emulator.New(emulator.Config{SOPath: "libfoo.so", JNI: MyJni{}})
 
 | 引擎 | 构建标签 | 链接方式 | 速度(热路径) | 许可证 |
 |---|---|---|---|---|
-| **interp**(纯 Go) | 无,始终可用 | **无依赖**(纯 Go,无 cgo) | ~10 ms/次 | Apache-2.0 |
+| **interp**(纯 Go) | 无,始终可用 | **无依赖**(纯 Go,无 cgo) | ~9.6 ms/次 | Apache-2.0 |
 | **Unicorn2** | `-tags unicorn` | 运行时 `dlopen` libunicorn | ~13 ms/次 | GPLv2 |
-| **dynarmic** | `-tags dynarmic` | **静态链接**(C++ via zig) | ~2–4 ms/次 | 0BSD |
+| **dynarmic** | `-tags dynarmic` | **静态链接**(C++ via zig) | ~2.1 ms/次 | 0BSD |
 
 - 引擎可以同时编进一个二进制(`-tags "unicorn dynarmic"`),运行期再选:`gonidbg -engine interp …` 或 `GONIDBG_ENGINE=interp`。没有任何标签时只有 `interp`,它也是这时的默认;装了 Unicorn 则优先用 Unicorn(久经验证)。
-- 上表的"速度"是在一个真实的生产混淆 `.so` 上测的一次签名调用(约 290 万条指令,复用同一个模拟器)。纯 Go 解释器比 Unicorn **快约 30%**,而且**冷启动快一个数量级**(约 9 ms vs 120 ms),因为没有 JIT 预热、也不用加载动态库。基准测试见 `internal/arm64/bench_test.go`(`go test -run X -bench . ./internal/arm64`)。
+- 上表的"速度"是在一个真实的生产混淆 `.so` 上测的一次签名调用(约 290 万条指令,复用同一个模拟器,同一台机器上三个引擎实测)。纯 Go 解释器比 Unicorn **快约 27%**,而且**冷启动快一个数量级**(约 9 ms vs 120 ms),因为没有 JIT 预热、也不用加载动态库;dynarmic 仍然快 4.6 倍 —— 为什么解释器追不上它、以及追上需要付什么代价,测量结果都记在 [internal/arm64/PERF.md](internal/arm64/PERF.md) 里。基准测试见 `internal/arm64/bench_test.go`(`go test -run X -bench . ./internal/arm64`)。
 - 纯 Go 引擎还顺带解决了几个 cgo 带来的麻烦:不需要 Windows 上的专属引擎线程;写入代码页会自动让已解码的指令失效,所以自修改代码不需要手动刷缓存;逐指令 hook 只是普通 Go 调用,不用跨 cgo 边界 —— **完整指令 trace 因此快 16 倍**(同一次签名调用:interp 约 0.32 s,Unicorn 约 5.1 s;冷启动那次 5.1 s vs 90 s)。做逆向时这个差别很实在。
 - 许可证提示:Unicorn 是 GPLv2,静态链接它会让整个二进制都变成 GPLv2,所以 gonidbg 把它放在运行时 `dlopen` 的边界之后。dynarmic 是 0BSD(宽松许可),静态链接 dynarmic 不会带来 copyleft 牵连。纯 Go 的 `interp` 就是本仓库代码,Apache-2.0,没有任何 copyleft 牵连。dynarmic 的构建见 [BUILD.md](BUILD.md)。
 
