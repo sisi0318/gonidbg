@@ -39,3 +39,5 @@ config.json
 /traces/**
 
 *.pkl
+assets.zip
+dy-server
